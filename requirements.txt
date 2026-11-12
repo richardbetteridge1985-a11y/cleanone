@@ -1,0 +1,14 @@
+# --- Core Infrastructure and Presentation ---
+gradio==4.44.1
+ollama==0.3.3
+litellm==1.49.0
+
+# --- Multi-Agent Orchestration ---
+crewai==0.65.2
+
+# --- RAG Ingestion & Vector Storage ---
+chromadb==0.5.15
+langchain-community==0.3.1
+langchain-text-splitters==0.3.0
+requests==2.32.3
+pyyaml==6.0.2

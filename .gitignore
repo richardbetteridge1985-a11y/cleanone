@@ -1,0 +1,21 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python Virtual Environment
+venv/
+ENV/
+env/
+
+# App-specific persistent data structures
+config/chroma_db/
+config/kb_hash.txt 
+
+# Local Environment Variables and Credentials
+.env
+*.env
+
+# VS Code Specific Settings and Caches
+.vscode/
+.DS_Store
