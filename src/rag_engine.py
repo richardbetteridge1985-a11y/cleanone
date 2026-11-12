@@ -1,13 +1,18 @@
 # src/rag_engine.py
+import logging
 import os
 import glob
 import hashlib
 import shutil
+import time
 import chromadb
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from crewai.tools import tool
 from crewai.tools import BaseTool
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
+
 
 class SearchInput(BaseModel):
     query: str = Field(..., description="The architectural concept or rule to look up.")
@@ -47,12 +52,13 @@ class RAGEngine:
     @classmethod
     def initialize_knowledge_base(cls):
         """Scans local documents for updates and rebuilds the vector index if changes occur."""
+        started = time.perf_counter()
         os.makedirs(cls._KB_DIR, exist_ok=True)
         os.makedirs("config", exist_ok=True)
 
         md_files = sorted(glob.glob(os.path.join(cls._KB_DIR, "*.md")))
         if not md_files:
-            print(f"⚠️ [RAG Engine] No .md files found in '{cls._KB_DIR}/'. Add documents to index.")
+            logger.warning("Knowledge base initialization skipped: no Markdown files found")
             return
 
         # 1. Check if documents have changed since last boot
@@ -63,10 +69,17 @@ class RAGEngine:
                 previous_hash = f.read().strip()
 
         if current_hash == previous_hash and os.path.exists(cls._DB_PATH):
-            print("📦 [RAG Engine] Local knowledge base is up to date. Skipping re-indexing.")
+            logger.info(
+                "Knowledge base is up to date document_count=%d duration_seconds=%.2f",
+                len(md_files),
+                time.perf_counter() - started,
+            )
             return
 
-        print("🔄 [RAG Engine] Document changes detected! Rebuilding local vector index...")
+        logger.info(
+            "Knowledge base rebuild started document_count=%d",
+            len(md_files),
+        )
 
         # 2. Wipe old database so deleted/edited paragraphs don't leave ghost data
         if os.path.exists(cls._DB_PATH):
@@ -104,11 +117,18 @@ class RAGEngine:
         with open(cls._HASH_FILE, "w", encoding="utf-8") as f:
             f.write(current_hash)
 
-        print(f"✅ [RAG Engine] Indexed {total_chunks} chunks across {len(md_files)} local documents.")
+        logger.info(
+            "Knowledge base rebuild completed document_count=%d chunk_count=%d "
+            "duration_seconds=%.2f",
+            len(md_files),
+            total_chunks,
+            time.perf_counter() - started,
+        )
 
     @classmethod
     def query_knowledge_base(cls, search_query: str, n_results: int = 3, source_filter: str | None = None) -> str:
         """Performs a semantic vector search, optionally scoped to a single source document."""
+        started = time.perf_counter()
         try:
             client = chromadb.PersistentClient(path=cls._DB_PATH)
             collection = client.get_collection(name=cls._COLLECTION_NAME)
@@ -126,6 +146,12 @@ class RAGEngine:
             metas = results.get("metadatas", [[]])[0]
             
             if not docs:
+                logger.info(
+                    "Knowledge search completed result_count=0 source=%s "
+                    "duration_seconds=%.2f",
+                    source_filter or "all",
+                    time.perf_counter() - started,
+                )
                 return f"No matching guidelines found in {source_filter or 'knowledge base'}."
 
             formatted_results = []
@@ -133,8 +159,21 @@ class RAGEngine:
                 source = meta.get("source", "Unknown")
                 formatted_results.append(f"[Source: {source}]\n{doc}")
                 
+            logger.info(
+                "Knowledge search completed result_count=%d source=%s "
+                "duration_seconds=%.2f",
+                len(formatted_results),
+                source_filter or "all",
+                time.perf_counter() - started,
+            )
             return "\n---\n".join(formatted_results)
         except Exception as e:
+            logger.error(
+                "Knowledge search failed source=%s error_type=%s duration_seconds=%.2f",
+                source_filter or "all",
+                type(e).__name__,
+                time.perf_counter() - started,
+            )
             return f"Error executing context retrieval logic: {str(e)}"
 
 

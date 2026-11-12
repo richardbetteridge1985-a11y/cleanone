@@ -1,6 +1,7 @@
 # src/llm_router.py
 import logging
 import os
+import time
 from crewai import LLM
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,7 @@ class LLMRouter:
         if model_str.startswith("bedrock/"):
             cls._verify_aws_credentials()
 
+        started = time.perf_counter()
         try:
             # Instantiate the unified CrewAI wrapper. 
             # This object behaves identically regardless of the backing engine.
@@ -64,13 +66,19 @@ class LLMRouter:
                 base_url=base_url,
                 **llm_options
             )
-            logger.info("LLM backend initialized model=%s", model_str)
+            logger.info(
+                "LLM backend initialized model=%s duration_seconds=%.2f",
+                model_str,
+                time.perf_counter() - started,
+            )
             return llm
         except Exception as e:
             logger.error(
-                "LLM backend initialization failed model=%s error_type=%s",
+                "LLM backend initialization failed model=%s error_type=%s "
+                "duration_seconds=%.2f",
                 model_str,
                 type(e).__name__,
+                time.perf_counter() - started,
             )
             raise RuntimeError(
                 f"Failed to initialize compute connection for {model_str}. "

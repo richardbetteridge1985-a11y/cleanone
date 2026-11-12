@@ -13,11 +13,25 @@ if __name__ == "__main__":
     logger.info("Application startup started")
 
     # Initialize the RAG Engine to ensure the local knowledge base is ready for retrieval-augmented generation tasks.
-    RAGEngine.initialize_knowledge_base()
+    try:
+        RAGEngine.initialize_knowledge_base()
+    except Exception as error:
+        logger.error(
+            "Knowledge base startup failed error_type=%s",
+            type(error).__name__,
+        )
+        raise
     logger.info(
         "Application startup completed duration_seconds=%.2f",
         time.perf_counter() - startup_started,
     )
 
     # Start the app
-    build_and_launch_ui()
+    try:
+        build_and_launch_ui()
+    except Exception as error:
+        logger.error(
+            "Application stopped unexpectedly error_type=%s",
+            type(error).__name__,
+        )
+        raise

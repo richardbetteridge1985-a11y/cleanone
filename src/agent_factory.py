@@ -166,6 +166,7 @@ class SmartPanelRunner:
         return selected
 
     def run(self, user_request: str):
+        panel_started = time.perf_counter()
         if self.proposal_uploaded:
             routing_text = ProposalProcessor.get_indexed_proposal_text()
         else:
@@ -207,7 +208,6 @@ class SmartPanelRunner:
                 "succeeded=%s",
                 agent_config["role"],
                 time.perf_counter() - stage_started,
-                not result.startswith("**Review coverage:**") or
                 "⚠️ Agent Automation Runtime Error:" not in result,
             )
 
@@ -279,6 +279,11 @@ class SmartPanelRunner:
             f"{technical_review}"
             "\n\n---\n\n## Solution Document Peer Review\n\n"
             f"{document_review}"
+        )
+        logger.info(
+            "Smart Panel completed specialist_count=%d duration_seconds=%.2f",
+            len(selected_specialists),
+            time.perf_counter() - panel_started,
         )
 
     def _run_review_agent(

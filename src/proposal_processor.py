@@ -96,7 +96,13 @@ class ProposalProcessor:
             if progress_callback:
                 progress_callback("Indexing proposal into session vector store...")
 
+            indexing_started = time.perf_counter()
             cls._index_sections(sections)
+            logger.info(
+                "Proposal indexing completed section_count=%d duration_seconds=%.2f",
+                len(sections),
+                time.perf_counter() - indexing_started,
+            )
 
             toc = [s["heading"] for s in sections if s["heading"]]
             summary = (

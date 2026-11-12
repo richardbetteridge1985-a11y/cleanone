@@ -1,8 +1,17 @@
 # src/ui.py
+import logging
+import os
+import time
+import uuid
+
 import gradio as gr
 from src.agent_factory import AgentFactory
 from src.llm_router import LLMRouter
+from src.logging_config import request_context
 from src.proposal_processor import ProposalProcessor
+
+logger = logging.getLogger(__name__)
+
 
 def build_and_launch_ui():
     individual_profiles = AgentFactory.get_individual_profiles()
@@ -15,8 +24,9 @@ def build_and_launch_ui():
         is_single = (review_mode == "Single Specialist Review")
         return gr.update(visible=is_single, interactive=is_single)
 
-    def ui_event_handler(user_input, uploaded_file, review_mode, specialist_choice, infrastructure_choice):
+    def process_request(user_input, uploaded_file, review_mode, specialist_choice, infrastructure_choice):
         if not user_input and not uploaded_file:
+            logger.warning("Request rejected: no prompt or proposal was provided")
             yield "⚠️ Please enter a prompt or upload a proposal document (`.docx`, `.pdf`, `.md`)."
             return
 
@@ -25,45 +35,88 @@ def build_and_launch_ui():
             target_profile = AgentFactory.ALL_AGENTS_LABEL
         else:
             if not specialist_choice:
+                logger.warning("Request rejected: no single specialist was selected")
                 yield "⚠️ Please select a specialist from the dropdown."
                 return
             target_profile = specialist_choice
 
-        try:
-            yield f"*⏳ Preparing {target_profile}...*"
+        logger.info(
+            "Review prepared mode=%s target=%s proposal_uploaded=%s",
+            review_mode,
+            target_profile,
+            uploaded_file is not None,
+        )
+        yield f"*⏳ Preparing {target_profile}...*"
+        effective_prompt = (
+            user_input.strip()
+            if user_input
+            else "Perform a comprehensive architectural review of the uploaded proposal."
+        )
+
+        if uploaded_file is not None:
+            file_type = os.path.splitext(uploaded_file)[1].lower()
+            ingestion_started = time.perf_counter()
+            logger.info("Proposal ingestion started file_type=%s", file_type)
+            yield "*⏳ Extracting text and translating diagrams from uploaded proposal...*\n\n"
+            proposal_summary = ProposalProcessor.process_file(
+                file_path=uploaded_file,
+                backend_choice=infrastructure_choice
+            )
+            logger.info(
+                "Proposal ingestion returned file_type=%s duration_seconds=%.2f",
+                file_type,
+                time.perf_counter() - ingestion_started,
+            )
             effective_prompt = (
-                user_input.strip()
-                if user_input
-                else "Perform a comprehensive architectural review of the uploaded proposal."
+                f"{effective_prompt}\n\n"
+                f"--- UPLOADED PROPOSAL METADATA ---\n{proposal_summary}\n"
+                "Use the 'Search Uploaded Solution Proposal' tool to inspect specific sections and diagrams."
             )
 
-            # 1. Parse document & translate diagrams if a file was uploaded
-            if uploaded_file is not None:
-                yield "*⏳ Extracting text and translating diagrams from uploaded proposal...*\n\n"
-                proposal_summary = ProposalProcessor.process_file(
-                    file_path=uploaded_file,
-                    backend_choice=infrastructure_choice
-                )
-                effective_prompt = (
-                    f"{effective_prompt}\n\n"
-                    f"--- UPLOADED PROPOSAL METADATA ---\n{proposal_summary}\n"
-                    "Use the 'Search Uploaded Solution Proposal' tool to inspect specific sections and diagrams."
-                )
+        llm_instance = LLMRouter.create_backend(infrastructure_choice)
+        agent_runner = AgentFactory.create_agent(
+            profile_id=target_profile,
+            llm=llm_instance,
+            proposal_uploaded=uploaded_file is not None
+        )
 
-            # 2. Instantiate backend & run either SmartPanelRunner or single AgentRunner
-            llm_instance = LLMRouter.create_backend(infrastructure_choice)
-            agent_runner = AgentFactory.create_agent(
-                profile_id=target_profile,
-                llm=llm_instance,
-                proposal_uploaded=uploaded_file is not None
+        yield f"*⏳ Running {target_profile}. This may take a few minutes...*"
+        for chunk in agent_runner.run(effective_prompt):
+            yield chunk
+
+    def ui_event_handler(user_input, uploaded_file, review_mode, specialist_choice, infrastructure_choice):
+        request_id = uuid.uuid4().hex[:12]
+        request_started = time.perf_counter()
+        with request_context(request_id):
+            logger.info(
+                "Review request received mode=%s backend=%s proposal_uploaded=%s",
+                review_mode,
+                infrastructure_choice,
+                uploaded_file is not None,
             )
-
-            yield f"*⏳ Running {target_profile}. This may take a few minutes...*"
-            for chunk in agent_runner.run(effective_prompt):
-                yield chunk
-
-        except Exception as e:
-            yield f"⚠️ Presentation Layer Error: {str(e)}"
+            status = "running"
+            try:
+                yield from process_request(
+                    user_input,
+                    uploaded_file,
+                    review_mode,
+                    specialist_choice,
+                    infrastructure_choice,
+                )
+                status = "completed"
+            except Exception as error:
+                status = "failed"
+                logger.error(
+                    "Review request failed error_type=%s",
+                    type(error).__name__,
+                )
+                yield f"⚠️ Presentation Layer Error: {str(error)}"
+            finally:
+                logger.info(
+                    "Review request finished status=%s duration_seconds=%.2f",
+                    status,
+                    time.perf_counter() - request_started,
+                )
 
     with gr.Blocks(theme="soft", title="Architect Agent Gateway") as app:
         gr.Markdown("# 🤖 Multi-Modal Architectural Review Gateway")
@@ -127,4 +180,5 @@ def build_and_launch_ui():
         )
 
     app.queue(default_concurrency_limit=1, max_size=1)
+    logger.info("Launching Gradio interface host=127.0.0.1 port=7860")
     app.launch(server_name="127.0.0.1", server_port=7860)

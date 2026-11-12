@@ -17,6 +17,11 @@ class RequestIdFilter(logging.Filter):
         return True
 
 
+class ApplicationLogFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.name == "__main__" or record.name.startswith("src.")
+
+
 @contextmanager
 def request_context(request_id: str) -> Iterator[None]:
     token: Token[str] = _request_id.set(request_id)
@@ -45,6 +50,7 @@ def configure_logging() -> None:
         "%(name)s: %(message)s"
     )
     request_filter = RequestIdFilter()
+    application_filter = ApplicationLogFilter()
     handlers = [
         logging.StreamHandler(),
         RotatingFileHandler(
@@ -60,6 +66,7 @@ def configure_logging() -> None:
     for handler in handlers:
         handler.setFormatter(formatter)
         handler.addFilter(request_filter)
+        handler.addFilter(application_filter)
         root_logger.addHandler(handler)
 
     _configured = True
