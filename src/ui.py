@@ -7,7 +7,7 @@ import uuid
 import gradio as gr
 from src.agent_factory import AgentFactory
 from src.llm_router import LLMRouter
-from src.logging_config import request_context
+from src.logging_config import iter_with_request_context, request_context
 from src.proposal_processor import ProposalProcessor
 
 logger = logging.getLogger(__name__)
@@ -27,7 +27,10 @@ def build_and_launch_ui():
     def process_request(user_input, uploaded_file, review_mode, specialist_choice, infrastructure_choice):
         if not user_input and not uploaded_file:
             logger.warning("Request rejected: no prompt or proposal was provided")
-            yield "⚠️ Please enter a prompt or upload a proposal document (`.docx`, `.pdf`, `.md`)."
+            yield (
+                "⚠️ Please enter a prompt or upload a solution file "
+                "(`.docx`, `.pdf`, `.md`, `.png`, `.jpg`, or `.jpeg`)."
+            )
             return
 
         # Determine whether to run the Smart Multi-Agent Panel or one chosen specialist
@@ -94,24 +97,29 @@ def build_and_launch_ui():
                 infrastructure_choice,
                 uploaded_file is not None,
             )
-            status = "running"
-            try:
-                yield from process_request(
+        status = "running"
+        try:
+            yield from iter_with_request_context(
+                process_request(
                     user_input,
                     uploaded_file,
                     review_mode,
                     specialist_choice,
                     infrastructure_choice,
-                )
-                status = "completed"
-            except Exception as error:
-                status = "failed"
+                ),
+                request_id,
+            )
+            status = "completed"
+        except Exception as error:
+            status = "failed"
+            with request_context(request_id):
                 logger.error(
                     "Review request failed error_type=%s",
                     type(error).__name__,
                 )
-                yield f"⚠️ Presentation Layer Error: {str(error)}"
-            finally:
+            yield f"⚠️ Presentation Layer Error: {str(error)}"
+        finally:
+            with request_context(request_id):
                 logger.info(
                     "Review request finished status=%s duration_seconds=%.2f",
                     status,
@@ -121,8 +129,10 @@ def build_and_launch_ui():
     with gr.Blocks(theme="soft", title="Architect Agent Gateway") as app:
         gr.Markdown("# 🤖 Multi-Modal Architectural Review Gateway")
         gr.Markdown(
-            "Upload a solution proposal (`.docx`, `.pdf`, `.md` with Mermaid or Lucidchart diagrams) "
-            "and run a full multi-agent review or target a single architectural lens."
+            "Upload a solution proposal (`.docx`, `.pdf`, `.md`, `.png`, `.jpg`, or `.jpeg`) "
+            "and run a full multi-agent review or target a single architectural lens. "
+            "The Smart Panel classifies the solution, selects relevant specialists, "
+            "and runs no more than four."
         )
 
         with gr.Row():
@@ -158,7 +168,7 @@ def build_and_launch_ui():
             with gr.Column(scale=4):
                 file_input = gr.File(
                     label="4. Upload Solution Proposal (Optional)",
-                    file_types=[".docx", ".pdf", ".md"],
+                    file_types=[".docx", ".pdf", ".md", ".png", ".jpg", ".jpeg"],
                     type="filepath"
                 )
                 prompt_input = gr.Textbox(

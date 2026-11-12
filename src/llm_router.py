@@ -13,7 +13,6 @@ class LLMRouter:
 
     _REQUEST_TIMEOUT_SECONDS = 90
     _MAX_OUTPUT_TOKENS = 1024
-    _LOCAL_CONTEXT_TOKENS = 4096
 
     # Note: AWS Bedrock paths use the format: bedrock/<provider>.<model>
     _BACKEND_MAP = {
@@ -58,8 +57,6 @@ class LLMRouter:
                 "timeout": cls._REQUEST_TIMEOUT_SECONDS,
                 "max_tokens": cls._MAX_OUTPUT_TOKENS,
             }
-            if model_str.startswith("ollama/"):
-                llm_options["num_ctx"] = cls._LOCAL_CONTEXT_TOKENS
 
             llm = LLM(
                 model=model_str,

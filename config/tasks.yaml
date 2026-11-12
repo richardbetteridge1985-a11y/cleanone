@@ -9,6 +9,12 @@ review_task:
 
     {user_request}
 
+    Treat code and solution examples labelled "As Is", "As-Is", "current process", or
+    "current state" as descriptive context, not as the desired design. Do not copy or
+    recommend them as target-state solutions. Base recommendations on an explicitly
+    stated future or target state; if none is stated, identify the ambiguity instead
+    of inventing a target.
+
     Follow these strict evaluation rules:
     1. Query your specialist knowledge base tool to retrieve the exact principles for your domain.
     2. If an uploaded proposal exists, query the proposal search tool to inspect relevant code, flows, and diagrams.
@@ -21,7 +27,9 @@ review_task:
        clarifications that are not covered by code snippets. If none exist, write "None."
     5. CONDITIONAL CODE SNIPPETS: Provide concrete "Before / After" or recommended code/config snippets
        ONLY IF your rating is **Fair** or **Bad**. If your rating is **Good** or **Not Applicable**,
-       omit the code snippets section completely. When included, this section must follow the minor tweaks summary.
+       omit the code snippets section completely. When included, use the heading
+       "Recommended Code / Structural Changes" after the minor tweaks summary. Never repeat
+       template instructions or placeholders, and do not output an empty section.
     6. CODE CHANGE LOCATIONS: Before every code or configuration snippet, state its target:
        - For an existing file, give the exact filename/path visible in the submission and name the specific
          function, class, configuration key, or section to change.
@@ -43,13 +51,6 @@ review_task:
     * [Small tweak or documentation clarification not covered by the code snippets below]
     * [Additional minor tweak, or write "None." if no further tweaks are needed]
 
-    **Recommended Code / Structural Changes**
-    *(Include this section ONLY if Rating is Fair or Bad. Delete this entire section if Rating is Good or Not Applicable.)*
-    **Location:** [Existing file path — change the named function/class/configuration section; or "Create new file: generic-filename.ext"]
-
-    ```python
-    # Show a concrete change for the location identified above
-    ```
 
 technical_reconciliation_task:
   description: >
@@ -207,27 +208,57 @@ final_review_task:
 
     {user_request}
 
-    Decide **Approved** only when the reviews identify no high-risk issues and no
-    major code or structural changes needed. Otherwise decide **Needs Revision**.
+    Make an implementation decision based on whether the design is likely to work
+    and meet the functional requirements stated in the design. Give **Pass** when
+    it is likely to do so and the reviews identify no architectural anti-pattern
+    or severe direct violation of a specialist domain. Give **Needs Revision** when
+    evidence indicates the design is unlikely to work, misses a stated functional
+    requirement, introduces an anti-pattern, or contains a severe direct violation.
+    A Fair/Bad specialist rating or ordinary improvement recommendation alone is
+    not a reason to block a pass; assess the specific evidence and severity.
+    Do not demand a perfect or fully specified design. Unknowns, non-blocking
+    omissions, and documentation quality alone do not fail implementation unless
+    they prevent a reasoned judgment that stated requirements will be met or expose
+    a blocking design risk.
+
     Summarize the proposed technical solution and how it aligns with the principles
-    actually assessed in the reviews. Also explain what the project appears to do
-    from a business point of view, grounded only in the review evidence. If that
-    purpose is unclear, say so rather than inventing details. Use plain, concise
-    language suitable for a non-technical reader. Do not claim suggested changes
-    have been implemented.
+    actually assessed in the reviews. Include a general assessment of how clearly
+    the supplied documentation presents the solution, based only on the solution-
+    document peer review. Then assign a separate documentation-presentation rating:
+    Good for clear, coherent documentation that communicates the solution and its
+    important decisions; Fair for understandable documentation with material gaps
+    or ambiguity; Bad when the solution is materially unclear, contradictory, or
+    difficult to understand. Use Unable to assess only when no proposal was
+    provided or the peer review could not inspect it. The documentation rating must
+    not by itself determine the implementation decision.
+
+    Also explain what the project appears to do from a business point of view,
+    grounded only in the review evidence. If that purpose is unclear, say so rather
+    than inventing details. Use plain, concise language suitable for a
+    non-technical reader. Do not claim suggested changes have been implemented.
   expected_output: >
-    Return concise Markdown with exactly these three sections and no conversational
+    Return concise Markdown with exactly these four sections and no conversational
     filler:
 
-    #### Decision
-    **[Approved | Needs Revision]**
-    [Brief reason. Approved means no high-risk issues or major code/structural
-    changes were identified. Needs Revision means at least one was identified.]
+    #### Implementation Decision
+    **[Pass | Needs Revision]**
+    [Brief evidence-based reason. Pass means the design is likely to work, meets
+    stated functional requirements, and has no identified architectural
+    anti-pattern or severe direct specialist violation. Ordinary recommendations
+    alone do not prevent a pass.]
 
     #### Technical Solution Summary
     [Briefly summarize the proposed technical solution and how well it aligns with
-    the principles assessed by the specialist and solution-document reviews.
-    Mention any significant risks or major changes that inform the decision.]
+    the principles assessed by the specialists. Mention significant risks or
+    blocking issues that inform the implementation decision.]
+
+    #### Solution Documentation Assessment
+    **General assessment:** [A concise remark on how well the supplied documentation
+    communicates the solution, based on the solution-document peer review.]
+
+    **Documentation Presentation Rating: [Good | Fair | Bad | Unable to assess]**
+    [Brief reason based on the peer-review findings. Use Unable to assess only when
+    there was no proposal or the peer review could not inspect it.]
 
     #### Business Understanding
     [Briefly summarize what the project appears to do and its business purpose,

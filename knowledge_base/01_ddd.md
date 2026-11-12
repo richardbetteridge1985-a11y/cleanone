@@ -20,3 +20,11 @@
 * **Domain Isolation:** Ensure the core domain layer has zero dependencies on infrastructure, databases, UI frameworks, or third-party libraries. Dependencies should always point inward toward the domain, following patterns like Hexagonal, Onion, or Clean Architecture.
 * **Application Services:** Check that the application layer remains thin and acts only as a coordinator. It should fetch Aggregates from Repositories, execute domain methods, save changes, and publish events without containing business rules itself.
 * **Pragmatic Application:** Evaluate whether DDD is actually appropriate for the problem's complexity. Applying heavy tactical DDD patterns to simple CRUD (Create, Read, Update, Delete) subdomains adds unnecessary overhead.
+
+## When to Skip Domain-Driven Design (DDD)
+* **Simple CRUD applications:** Software that mainly creates, reads, updates, and deletes database records without intricate business rules works much faster with simple, direct architectures.
+* **Early-stage prototypes and MVPs:** When you are still validating a product idea and requirements change daily, the upfront discovery and rigid modeling of DDD will slow down delivery.
+* **Purely technical challenges:** Systems focused on raw performance, data pipelines, video streaming, or low-latency request routing rely on infrastructure and algorithmic optimization rather than business domain modeling.
+* **Short-lived or throwaway software:** One-off data migration scripts, temporary event microsites, or short-term internal tools do not live long enough to pay back the investment of rich domain models.
+* **Generic or supporting subdomains:** Even inside a large DDD project, skip tactical DDD for standard features like user authentication, notifications, or basic reporting, and instead use off-the-shelf tools or simple transaction scripts.
+* **Lack of domain experts or DDD experience:** DDD relies heavily on close collaboration with business experts to build a shared language, and forcing a team without experience to use tactical DDD patterns often creates over-engineered, unmaintainable code.

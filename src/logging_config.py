@@ -4,11 +4,12 @@ from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, TypeVar
 
 
 _request_id: ContextVar[str] = ContextVar("request_id", default="-")
 _configured = False
+_T = TypeVar("_T")
 
 
 class RequestIdFilter(logging.Filter):
@@ -29,6 +30,21 @@ def request_context(request_id: str) -> Iterator[None]:
         yield
     finally:
         _request_id.reset(token)
+
+
+def iter_with_request_context(
+    iterable: Iterator[_T],
+    request_id: str,
+) -> Iterator[_T]:
+    iterator = iter(iterable)
+    while True:
+        try:
+            with request_context(request_id):
+                item = next(iterator)
+        except StopIteration:
+            return
+        # Reset the context before yielding so streaming callers can resume safely.
+        yield item
 
 
 def configure_logging() -> None:

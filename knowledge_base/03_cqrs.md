@@ -20,3 +20,11 @@
 ## Assessment & Trade-Off Checks
 * **Pragmatic Adoption:** Confirm that CQRS is applied selectively to complex Bounded Contexts or systems with asymmetric read/write loads. Applying full CQRS with separate databases to simple CRUD features introduces unnecessary boilerplate and operational complexity.
 * **Idempotency & Concurrency:** Check how the write side handles duplicate commands (idempotency keys) and simultaneous edits to the same record (optimistic concurrency control).
+
+## When to Skip Command Query Responsibility Segregation (CQRS)
+* **Read and write models match closely.** When the data structure you save to the database looks almost identical to the data structure you display to the user, separating commands and queries creates duplicate models without any real benefit.
+* **Simple CRUD applications.** Basic forms, settings pages, and standard administrative tools work much faster and cleaner with a single unified data model and straightforward repository or ORM calls.
+* **Strict immediate read-after-write consistency is required.** If users must immediately see their exact updated data on the next screen without any replication lag, using separate read and write databases introduces unnecessary synchronization headaches.
+* **Balanced or low read-to-write ratios.** CQRS shines when reads vastly outnumber writes and need independent scaling; if your traffic is evenly balanced or low-volume, a single well-indexed database is far simpler to maintain.
+* **Small teams or tight delivery timelines.** Maintaining separate command handlers, query handlers, data transfer objects, and synchronization pipelines doubles the surface area for bugs and slows down small teams.
+* **Application-wide enforcement by default.** Like DDD, CQRS is meant to be applied selectively to specific complex subsystems rather than forced across an entire application where most screens are simple.

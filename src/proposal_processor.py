@@ -25,6 +25,8 @@ class ProposalProcessor:
 
     _SESSION_DB_PATH = os.path.join("config", "session_proposal_db")
     _COLLECTION_NAME = "active_proposal"
+    _SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
+    _SUPPORTED_EXTENSIONS = {".docx", ".pdf", ".md"} | _SUPPORTED_IMAGE_EXTENSIONS
 
     @classmethod
     def process_file(cls, file_path: str, backend_choice: str, progress_callback=None) -> str:
@@ -32,6 +34,11 @@ class ProposalProcessor:
         started = time.perf_counter()
         _, raw_ext = os.path.splitext(file_path)
         ext = raw_ext.lower()
+        if ext not in cls._SUPPORTED_EXTENSIONS:
+            raise ValueError(
+                f"Unsupported file format: {ext or '[no extension]'}. "
+                "Upload .docx, .pdf, .md, .png, .jpg, or .jpeg."
+            )
         logger.info(
             "Proposal processing started file_type=%s file_size_bytes=%d backend=%s",
             ext,
@@ -59,8 +66,14 @@ class ProposalProcessor:
                 sections = cls._extract_pdf(file_path, temp_img_dir)
             elif ext == ".md":
                 sections = cls._extract_markdown(file_path)
+            elif ext in cls._SUPPORTED_IMAGE_EXTENSIONS:
+                sections = [{
+                    "heading": f"Uploaded Solution Image: {os.path.basename(file_path)}",
+                    "text": "",
+                    "images": [file_path],
+                }]
             else:
-                raise ValueError(f"Unsupported file format: {ext}. Upload .docx, .pdf, or .md.")
+                raise ValueError(f"Unsupported file format: {ext}")
 
             total_images = sum(len(s["images"]) for s in sections)
             logger.info(

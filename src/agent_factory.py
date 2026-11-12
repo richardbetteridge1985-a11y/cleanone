@@ -5,11 +5,20 @@ import time
 import yaml
 from crewai import Agent, Task, Crew
 from src.rag_engine import ScopedKnowledgeTool
+from src.output_cleanup import clean_conditional_code_section
 from src.proposal_processor import ProposalProcessor, ProposalSearchTool
+from src.solution_architect_triage import SolutionArchitectTriageAgent, TriageDecision
 
 
 logger = logging.getLogger(__name__)
 
+_CORE_SPECIALIST_KEYS = {
+    "ddd_specialist",
+    "clean_arch_specialist",
+    "cqrs_specialist",
+    "eda_specialist",
+    "nfr_specialist",
+}
 
 
 class AgentFactory:
@@ -128,12 +137,13 @@ class SmartPanelRunner:
         self.llm = llm_instance
         self.proposal_uploaded = proposal_uploaded
 
-    def _select_specialists(self, routing_text: str) -> list[tuple[str, dict]]:
+    def _select_additional_specialists(self, routing_text: str) -> list[tuple[str, dict]]:
         routing_text = routing_text.casefold()
         selected = [
             (profile_key, agent_config)
             for profile_key, agent_config in self.agents_metadata.items()
-            if not agent_config.get("internal_only")
+            if profile_key not in _CORE_SPECIALIST_KEYS
+            and not agent_config.get("internal_only")
             and (
                 agent_config.get("always_include")
                 or (
@@ -146,10 +156,40 @@ class SmartPanelRunner:
                 )
             )
         ]
-        if not selected:
-            raise ValueError(
-                "No specialist profiles matched the request in agents.yaml."
-            )
+        return selected
+
+    def _select_specialists(
+        self,
+        routing_text: str,
+        triage_selected: tuple[str, ...] | None = None,
+        additional_selected: list[tuple[str, dict]] | None = None,
+    ) -> list[tuple[str, dict]]:
+        if triage_selected is None:
+            selected = [
+                (profile_key, agent_config)
+                for profile_key, agent_config in self.agents_metadata.items()
+                if not agent_config.get("internal_only")
+                and (
+                    agent_config.get("always_include")
+                    or (
+                        not agent_config.get("routing_keywords")
+                        and not agent_config.get("conditional_routing")
+                    )
+                    or any(
+                        keyword.casefold() in routing_text.casefold()
+                        for keyword in agent_config.get("routing_keywords", [])
+                    )
+                )
+            ]
+        else:
+            selected_keys = set(triage_selected)
+            selected = [
+                (profile_key, agent_config)
+                for profile_key, agent_config in self.agents_metadata.items()
+                if profile_key in selected_keys
+            ]
+            selected.extend(additional_selected or [])
+
         if len(selected) > self.MAX_SPECIALISTS:
             names = ", ".join(config["role"] for _, config in selected)
             logger.warning(
@@ -158,21 +198,60 @@ class SmartPanelRunner:
                 self.MAX_SPECIALISTS,
             )
             raise ValueError(
-                f"Smart Panel matched {len(selected)} specialists, exceeding the "
+                f"Smart Panel selected {len(selected)} specialists, exceeding the "
                 f"safety limit of {self.MAX_SPECIALISTS}: {names}. Narrow the request "
                 "or use Single Specialist Review."
             )
-
         return selected
 
     def run(self, user_request: str):
         panel_started = time.perf_counter()
+        yield "⏳ Solution Architect is classifying the solution and selecting relevant specialist reviews..."
         if self.proposal_uploaded:
             routing_text = ProposalProcessor.get_indexed_proposal_text()
         else:
             routing_text = user_request
 
-        selected_specialists = self._select_specialists(routing_text)
+        additional_candidates = self._select_additional_specialists(routing_text)
+        omitted_additional = []
+        if len(additional_candidates) >= self.MAX_SPECIALISTS:
+            omitted_additional = additional_candidates[self.MAX_SPECIALISTS - 1:]
+            additional_candidates = additional_candidates[:self.MAX_SPECIALISTS - 1]
+        available_core_slots = self.MAX_SPECIALISTS - len(additional_candidates)
+        triage = SolutionArchitectTriageAgent(
+            agents_metadata=self.agents_metadata,
+            max_specialists=self.MAX_SPECIALISTS,
+        ).assess(
+            llm=self.llm,
+            user_request=user_request,
+            proposal_uploaded=self.proposal_uploaded,
+            available_agent_slots=available_core_slots,
+        )
+        triage_report = self._format_triage_report(
+            triage,
+            additional_candidates,
+            omitted_additional,
+        )
+        if not triage.solution_related:
+            yield (
+                f"{triage_report}\n\n"
+                "⛔ Smart Panel review not started: the supplied content is unrelated "
+                "to software or a digital solution."
+            )
+            return
+
+        selected_specialists = self._select_specialists(
+            routing_text,
+            triage_selected=triage.selected_agent_keys,
+            additional_selected=additional_candidates,
+        )
+        if not selected_specialists:
+            yield (
+                f"{triage_report}\n\n"
+                "No specialist reviews were selected for this solution."
+            )
+            return
+
         logger.info(
             "Smart Panel started specialist_count=%d proposal_uploaded=%s specialists=%s",
             len(selected_specialists),
@@ -184,6 +263,7 @@ class SmartPanelRunner:
         total_stages = len(selected_specialists) + 3
         for index, (_, agent_config) in enumerate(selected_specialists, start=1):
             yield (
+                f"{triage_report}\n\n---\n\n"
                 f"⏳ Smart Panel: running specialist {index}/"
                 f"{len(selected_specialists)} — {agent_config['role']}.\n\n"
                 f"Completed: {', '.join(completed_agents) or 'None'}"
@@ -213,6 +293,7 @@ class SmartPanelRunner:
 
         original_feedback = "\n\n---\n\n".join(results)
         yield (
+            f"{triage_report}\n\n---\n\n"
             f"⏳ Smart Panel: running reconciliation ({len(completed_agents) + 1}/"
             f"{total_stages}).\n\n"
             f"Completed: {', '.join(completed_agents)}"
@@ -236,6 +317,7 @@ class SmartPanelRunner:
 
         completed_agents.append("Technical Feedback Reconciliation Reviewer")
         yield (
+            f"{triage_report}\n\n---\n\n"
             f"⏳ Smart Panel: reviewing the solution document "
             f"({len(completed_agents) + 1}/{total_stages}).\n\n"
             f"Completed: {', '.join(completed_agents)}"
@@ -258,6 +340,7 @@ class SmartPanelRunner:
 
         completed_agents.append("Solution Document Architecture Peer Reviewer")
         yield (
+            f"{triage_report}\n\n---\n\n"
             f"⏳ Smart Panel: preparing the final review "
             f"({len(completed_agents) + 1}/{total_stages}).\n\n"
             f"Completed: {', '.join(completed_agents)}"
@@ -274,16 +357,58 @@ class SmartPanelRunner:
         )
 
         yield (
+            f"{triage_report}\n\n---\n\n"
             f"## Overall Solution Review\n\n{overall_review}"
             "\n\n---\n\n## Specialist Feedback\n\n"
             f"{technical_review}"
-            "\n\n---\n\n## Solution Document Peer Review\n\n"
-            f"{document_review}"
         )
         logger.info(
             "Smart Panel completed specialist_count=%d duration_seconds=%.2f",
             len(selected_specialists),
             time.perf_counter() - panel_started,
+        )
+
+    def _format_triage_report(
+        self,
+        triage: TriageDecision,
+        additional_selected: list[tuple[str, dict]],
+        omitted_additional: list[tuple[str, dict]],
+    ) -> str:
+        selected_keys = set(triage.selected_agent_keys)
+        assessment_by_key = {
+            assessment.agent_key: assessment
+            for assessment in triage.agent_assessments
+        }
+        selected_lines = [
+            f"- **{self.agents_metadata[key]['role']}** — "
+            f"{assessment_by_key[key].reason}"
+            for key in triage.selected_agent_keys
+        ]
+        selected_lines.extend(
+            f"- **{config['role']}** — selected by the existing specialist-routing rules."
+            for _, config in additional_selected
+        )
+        not_selected_lines = [
+            f"- **{self.agents_metadata[key]['role']}** — "
+            f"{assessment_by_key[key].reason}"
+            for key in assessment_by_key
+            if key not in selected_keys
+        ]
+        not_selected_lines.extend(
+            f"- **{config['role']}** — not selected because the Smart Panel "
+            "specialist safety limit was reached."
+            for _, config in omitted_additional
+        )
+        selected_text = "\n".join(selected_lines) if selected_lines else "- None"
+        not_selected_text = "\n".join(not_selected_lines) if not_selected_lines else "- None"
+        return (
+            "## Solution Classification\n\n"
+            f"**Classification:** {triage.classification}\n\n"
+            f"{triage.classification_reason}\n\n"
+            "### Specialists Selected\n\n"
+            f"{selected_text}\n\n"
+            "### Specialists Not Selected\n\n"
+            f"{not_selected_text}"
         )
 
     def _run_review_agent(
@@ -384,7 +509,7 @@ class AgentRunner:
             len(tools),
             self.proposal_uploaded,
         )
-        response = str(crew.kickoff())
+        response = clean_conditional_code_section(str(crew.kickoff()))
         logger.info(
             "Agent execution completed role=%s duration_seconds=%.2f output_chars=%d",
             self.agent_config["role"],
