@@ -30,6 +30,7 @@ def build_and_launch_ui():
             target_profile = specialist_choice
 
         try:
+            yield f"*⏳ Preparing {target_profile}...*"
             effective_prompt = (
                 user_input.strip()
                 if user_input
@@ -57,6 +58,7 @@ def build_and_launch_ui():
                 proposal_uploaded=uploaded_file is not None
             )
 
+            yield f"*⏳ Running {target_profile}. This may take a few minutes...*"
             for chunk in agent_runner.run(effective_prompt):
                 yield chunk
 
@@ -81,15 +83,15 @@ def build_and_launch_ui():
                     "Smart Panel (Auto-Select Relevant Specialists)",
                     "Single Specialist Review"
                 ],
-                value="Smart Panel (Auto-Select Relevant Specialists)",
+                value="Single Specialist Review",
                 label="2. Review Scope"
             )
             specialist_dropdown = gr.Dropdown(
                 choices=individual_profiles,
                 value=default_specialist,
                 label="3. Choose Specific Specialist",
-                visible=False,
-                interactive=False
+                visible=True,
+                interactive=True
             )
 
         # Dynamically show/hide the specialist dropdown when the user toggles the radio button
@@ -124,4 +126,5 @@ def build_and_launch_ui():
             outputs=output_display
         )
 
+    app.queue(default_concurrency_limit=1, max_size=1)
     app.launch(server_name="127.0.0.1", server_port=7860)

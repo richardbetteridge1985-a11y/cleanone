@@ -1,10 +1,14 @@
 # src/agent_factory.py
+import logging
 import os
+import time
 import yaml
 from crewai import Agent, Task, Crew
 from src.rag_engine import ScopedKnowledgeTool
 from src.proposal_processor import ProposalProcessor, ProposalSearchTool
 
+
+logger = logging.getLogger(__name__)
 
 
 
@@ -28,7 +32,11 @@ class AgentFactory:
                 for key, config in configs.items()
                 if not config.get("internal_only")
             ]
-        except Exception:
+        except Exception as error:
+            logger.error(
+                "Unable to load individual agent profiles error_type=%s",
+                type(error).__name__,
+            )
             return []
         
     @classmethod
@@ -50,7 +58,11 @@ class AgentFactory:
                 for key, config in configs.items()
                 if not config.get("internal_only")
             ]
-        except Exception:
+        except Exception as error:
+            logger.error(
+                "Unable to load available agent profiles error_type=%s",
+                type(error).__name__,
+            )
             return []
 
     @classmethod
@@ -100,7 +112,9 @@ class AgentFactory:
         )
 
 class SmartPanelRunner:
-    """Runs every specialist configured in agents.yaml."""
+    """Runs a bounded set of relevant specialists configured in agents.yaml."""
+
+    MAX_SPECIALISTS = 4
 
     def __init__(
         self,
@@ -121,7 +135,11 @@ class SmartPanelRunner:
             for profile_key, agent_config in self.agents_metadata.items()
             if not agent_config.get("internal_only")
             and (
-                not agent_config.get("conditional_routing")
+                agent_config.get("always_include")
+                or (
+                    not agent_config.get("routing_keywords")
+                    and not agent_config.get("conditional_routing")
+                )
                 or any(
                     keyword.casefold() in routing_text
                     for keyword in agent_config.get("routing_keywords", [])
@@ -130,7 +148,19 @@ class SmartPanelRunner:
         ]
         if not selected:
             raise ValueError(
-                "No agent profiles are configured in agents.yaml."
+                "No specialist profiles matched the request in agents.yaml."
+            )
+        if len(selected) > self.MAX_SPECIALISTS:
+            names = ", ".join(config["role"] for _, config in selected)
+            logger.warning(
+                "Smart Panel selection exceeded safety limit selected=%d limit=%d",
+                len(selected),
+                self.MAX_SPECIALISTS,
+            )
+            raise ValueError(
+                f"Smart Panel matched {len(selected)} specialists, exceeding the "
+                f"safety limit of {self.MAX_SPECIALISTS}: {names}. Narrow the request "
+                "or use Single Specialist Review."
             )
 
         return selected
@@ -141,8 +171,22 @@ class SmartPanelRunner:
         else:
             routing_text = user_request
 
+        selected_specialists = self._select_specialists(routing_text)
+        logger.info(
+            "Smart Panel started specialist_count=%d proposal_uploaded=%s specialists=%s",
+            len(selected_specialists),
+            self.proposal_uploaded,
+            ", ".join(config["role"] for _, config in selected_specialists),
+        )
         results = []
-        for _, agent_config in self._select_specialists(routing_text):
+        completed_agents = []
+        total_stages = len(selected_specialists) + 3
+        for index, (_, agent_config) in enumerate(selected_specialists, start=1):
+            yield (
+                f"⏳ Smart Panel: running specialist {index}/"
+                f"{len(selected_specialists)} — {agent_config['role']}.\n\n"
+                f"Completed: {', '.join(completed_agents) or 'None'}"
+            )
             task_key = agent_config.get("task_key", "review_task")
             if task_key not in self.tasks_metadata:
                 raise ValueError(f"Task context '{task_key}' not defined in tasks.yaml")
@@ -153,10 +197,26 @@ class SmartPanelRunner:
                 llm_instance=self.llm,
                 proposal_uploaded=self.proposal_uploaded
             )
+            stage_started = time.perf_counter()
+            logger.info("Smart Panel specialist started role=%s", agent_config["role"])
             result = "\n".join(runner.run(user_request))
             results.append(f"### {agent_config['role']}\n\n{result}")
+            completed_agents.append(agent_config["role"])
+            logger.info(
+                "Smart Panel specialist completed role=%s duration_seconds=%.2f "
+                "succeeded=%s",
+                agent_config["role"],
+                time.perf_counter() - stage_started,
+                not result.startswith("**Review coverage:**") or
+                "⚠️ Agent Automation Runtime Error:" not in result,
+            )
 
         original_feedback = "\n\n---\n\n".join(results)
+        yield (
+            f"⏳ Smart Panel: running reconciliation ({len(completed_agents) + 1}/"
+            f"{total_stages}).\n\n"
+            f"Completed: {', '.join(completed_agents)}"
+        )
         technical_review = self._run_review_agent(
             "technical_reconciliation_agent",
             self.tasks_metadata,
@@ -174,6 +234,12 @@ class SmartPanelRunner:
                 f"{original_feedback}"
             )
 
+        completed_agents.append("Technical Feedback Reconciliation Reviewer")
+        yield (
+            f"⏳ Smart Panel: reviewing the solution document "
+            f"({len(completed_agents) + 1}/{total_stages}).\n\n"
+            f"Completed: {', '.join(completed_agents)}"
+        )
         document_review = self._run_review_agent(
             "solution_document_review_agent",
             self.tasks_metadata,
@@ -190,6 +256,12 @@ class SmartPanelRunner:
             proposal_uploaded=self.proposal_uploaded
         )
 
+        completed_agents.append("Solution Document Architecture Peer Reviewer")
+        yield (
+            f"⏳ Smart Panel: preparing the final review "
+            f"({len(completed_agents) + 1}/{total_stages}).\n\n"
+            f"Completed: {', '.join(completed_agents)}"
+        )
         overall_review = self._run_review_agent(
             "final_review_agent",
             self.tasks_metadata,
@@ -233,8 +305,21 @@ class SmartPanelRunner:
             proposal_uploaded=proposal_uploaded
         )
         try:
-            return runner.execute_sync(user_request)
+            started = time.perf_counter()
+            logger.info("Internal review started role=%s", agent_config["role"])
+            result = runner.execute_sync(user_request)
+            logger.info(
+                "Internal review completed role=%s duration_seconds=%.2f",
+                agent_config["role"],
+                time.perf_counter() - started,
+            )
+            return result
         except Exception as error:
+            logger.error(
+                "Internal review failed role=%s error_type=%s",
+                agent_config["role"],
+                type(error).__name__,
+            )
             return f"⚠️ {agent_config['role']} failed: {error}"
 
 class AgentRunner:
@@ -255,6 +340,7 @@ class AgentRunner:
         self.proposal_evidence_retrieved = False
 
     def execute_sync(self, user_request: str) -> str:
+        started = time.perf_counter()
         target_doc = self.agent_config.get("knowledge_source")
         tools = []
         if target_doc:
@@ -268,9 +354,11 @@ class AgentRunner:
             goal=self.agent_config["goal"],
             backstory=self.agent_config["backstory"],
             llm=self.llm,
-            verbose=True,
+            verbose=False,
             allow_delegation=False,
-            tools=tools
+            tools=tools,
+            max_iter=3,
+            max_execution_time=180,
         )
         
         crew_task = Task(
@@ -282,10 +370,22 @@ class AgentRunner:
         crew = Crew(
             agents=[crew_agent],
             tasks=[crew_task],
-            verbose=True
+            verbose=False
         )
         
+        logger.info(
+            "Agent execution started role=%s tool_count=%d proposal_uploaded=%s",
+            self.agent_config["role"],
+            len(tools),
+            self.proposal_uploaded,
+        )
         response = str(crew.kickoff())
+        logger.info(
+            "Agent execution completed role=%s duration_seconds=%.2f output_chars=%d",
+            self.agent_config["role"],
+            time.perf_counter() - started,
+            len(response),
+        )
         if self.proposal_uploaded:
             self.proposal_evidence_retrieved = tools[-1].retrieved_evidence
         return response
@@ -294,6 +394,11 @@ class AgentRunner:
         try:
             response = self.execute_sync(user_request)
         except Exception as e:
+            logger.error(
+                "Agent execution failed role=%s error_type=%s",
+                self.agent_config["role"],
+                type(e).__name__,
+            )
             response = f"⚠️ Agent Automation Runtime Error: {str(e)}"
 
         if self.proposal_uploaded:

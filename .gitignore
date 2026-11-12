@@ -11,6 +11,7 @@ env/
 # App-specific persistent data structures
 config/chroma_db/
 config/kb_hash.txt 
+logs/
 
 # Local Environment Variables and Credentials
 .env

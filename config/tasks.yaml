@@ -108,74 +108,95 @@ technical_reconciliation_task:
 solution_document_review_task:
   description: >
     Act as a solution-architect peer reviewer for the uploaded solution write-up.
-    Query your assigned general architecture knowledge source and, when an uploaded
-    proposal exists, search the proposal for evidence against every assessment
-    attribute listed in that knowledge source. Assess the document against each
-    attribute individually and use the exact same Pass/Fail rubric for every review.
+    Query your assigned general architecture knowledge source and search the uploaded
+    proposal separately for evidence related to each of the 12 checklist attributes.
+    The checklist confirms whether modern proposal standards are addressed at least
+    to some degree; it does not mean every criterion under a matched attribute is
+    fully satisfied.
 
     {user_request}
 
-    Judge the written proposal itself; do not re-review or alter the specialists'
-    technical recommendations. Compare the document with the reconciled technical
-    feedback and identify the specific changes the document needs to remain consistent
-    with the proposed technical changes. Distinguish missing information, ambiguity,
-    and contradictions from implementation recommendations. Do not claim a document
-    section exists unless it was retrieved. If no proposal was uploaded, explicitly
-    state that the document cannot be assessed from an uploaded proposal.
+    Judge the written proposal itself as an experienced solution architect. Explain
+    your view in simple terms. Do not re-review or alter the specialists' technical
+    recommendations. Compare the document with the reconciled technical feedback
+    and identify any specific documentation changes needed to keep it consistent.
+    Distinguish checklist gaps and unknowns from proven design errors. Do not call
+    missing evidence a confirmed flaw, and do not claim a design cannot work unless
+    retrieved evidence supports that conclusion. Do not claim a document section
+    exists unless it was retrieved. If no proposal was uploaded, say the document
+    cannot be assessed and mark each checklist item "Unable to assess."
 
-    For every proposed document edit, identify the exact retrieved section or heading.
-    If no section can be identified, say so and ask the author to place it; do not
-    invent headings or filenames. Keep business-facing and implementation-facing
-    communication needs distinct.
+    For each checklist attribute, mark "Found" only if the retrieved proposal
+    contains relevant evidence for at least one of its criteria; explain what is
+    covered and any notable gap. Mark "Not found" when proposal searching found no
+    relevant evidence, and "Unable to assess" only when there is no uploaded proposal
+    or the evidence could not be retrieved. Cite the exact retrieved heading or say
+    "No matching evidence retrieved." For every documentation change, error, or
+    contradiction, cite the exact retrieved section(s); if no section can be
+    identified, say so without inventing a heading. Keep business-facing and
+    implementation-facing concerns clear and use plain language.
 
-    Apply these scoring rules strictly:
-    - PASS only when retrieved evidence demonstrates that all key criteria for the
-      attribute are met.
-    - FAIL when evidence shows a criterion is not met or when the proposal does not
-      provide enough evidence to verify it. For an evidence gap, say "Not evidenced
-      in the reviewed proposal"; do not state that the capability is absent unless
-      the proposal supports that conclusion.
-    - Every FAIL must include a concise, specific reason tied to the checklist and
-      cite the retrieved section or state that no supporting section was found.
-    - Give a concise evidence note for PASS results too. Do not use partial,
-      N/A, or other status values; explain unavailable assessment evidence as FAIL.
-    - Assess all 12 attributes in 00_general.md, in their source order. Do not omit
-      an attribute because it seems irrelevant; if evidence is not applicable or
-      absent, record FAIL with that explanation.
+    Report a project risk opinion (Low, Medium, High, or Unable to assess) based
+    on evidence, explaining the main complications, unknowns, and risks. In the
+    documentation-errors section, include only evidenced mistakes that would make
+    the proposed design fail to work as described, or direct contradictions between
+    retrieved sections. Do not present ordinary omissions or unverified assumptions
+    as proven errors. Assess all 12 attributes in 00_general.md, in their source
+    order; do not omit any item.
   expected_output: >
-    Return Markdown using this standardized format, without conversational filler.
-    Include exactly one row for each of the 12 knowledge-source attributes, in order.
-    Each status must be exactly PASS or FAIL. Each FAIL row must give a specific
-    reason and cite the proposal evidence or state "Not evidenced in the reviewed
-    proposal."
+    Return simple, concise Markdown with exactly these five sections and no
+    conversational filler. Include exactly one row for each of the 12 checklist
+    attributes, in source order. Use only "Found", "Not found", or "Unable to
+    assess" in the checklist match column. "Found" means some relevant coverage was
+    found, not that the attribute is fully satisfied. For each row, cite the
+    retrieved proposal heading and briefly explain the match and any important gap;
+    for "Not found", write "No matching evidence retrieved." If there is no uploaded
+    proposal, mark all rows "Unable to assess" and explain that no proposal was
+    available.
 
     #### Solution Document Peer Review
-    **Overall Assessment:** [Brief judgment of the document's standards alignment and usefulness to business and implementation audiences.]
+    [A short assessment from an experienced solution architect: what the design
+    proposes, whether it reflects modern proposal standards, and the most important
+    strength or gap. Use simple terms.]
+
+    #### Checklist Coverage
 
     **Business & Executive Assessment**
-
     | Knowledge-source attribute | Result | Evidence or reason |
     |---|---|---|
-    | Architecture Vision & Strategic Alignment (TOGAF Phase A) | PASS/FAIL | [Evidence and section, or specific failure reason] |
-    | Stakeholder & Concern Mapping (TOGAF Stakeholder Management) | PASS/FAIL | [Evidence and section, or specific failure reason] |
-    | Business Capability & Process Impact (TOGAF Phase B) | PASS/FAIL | [Evidence and section, or specific failure reason] |
-    | Options Analysis & Architecture Decision Records (ADRs / ATAM) | PASS/FAIL | [Evidence and section, or specific failure reason] |
-    | Cost, Commercials & Resource Viability (FinOps / TOGAF Phase E) | PASS/FAIL | [Evidence and section, or specific failure reason] |
-    | Delivery Roadmap, Risks & Governance (TOGAF Phases E–G) | PASS/FAIL | [Evidence and section, or specific failure reason] |
+    | Architecture Vision & Strategic Alignment (TOGAF Phase A) | Found / Not found / Unable to assess | [What is covered or missing, with retrieved heading] |
+    | Stakeholder & Concern Mapping (TOGAF Stakeholder Management) | Found / Not found / Unable to assess | [What is covered or missing, with retrieved heading] |
+    | Business Capability & Process Impact (TOGAF Phase B) | Found / Not found / Unable to assess | [What is covered or missing, with retrieved heading] |
+    | Options Analysis & Architecture Decision Records (ADRs / ATAM) | Found / Not found / Unable to assess | [What is covered or missing, with retrieved heading] |
+    | Cost, Commercials & Resource Viability (FinOps / TOGAF Phase E) | Found / Not found / Unable to assess | [What is covered or missing, with retrieved heading] |
+    | Delivery Roadmap, Risks & Governance (TOGAF Phases E–G) | Found / Not found / Unable to assess | [What is covered or missing, with retrieved heading] |
 
     **Technical & Engineering Assessment**
-
     | Knowledge-source attribute | Result | Evidence or reason |
     |---|---|---|
-    | Multi-Level Visual Clarity & Diagram Consistency (C4 Model & arc42) | PASS/FAIL | [Evidence and section, or specific failure reason] |
-    | Data Architecture & Lifecycle Governance (TOGAF Phase C - Data) | PASS/FAIL | [Evidence and section, or specific failure reason] |
-    | Integration Contracts & Interface Specifications (arc42 Runtime & Interfaces) | PASS/FAIL | [Evidence and section, or specific failure reason] |
-    | Quantified Non-Functional Requirements (arc42 & ATAM) | PASS/FAIL | [Evidence and section, or specific failure reason] |
-    | Security, Identity & Trust Boundaries (Zero Trust / TOGAF Security) | PASS/FAIL | [Evidence and section, or specific failure reason] |
-    | Deployment Topology, Operability & Verification (arc42 Deployment & Crosscutting) | PASS/FAIL | [Evidence and section, or specific failure reason] |
+    | Multi-Level Visual Clarity & Diagram Consistency (C4 Model & arc42) | Found / Not found / Unable to assess | [What is covered or missing, with retrieved heading] |
+    | Data Architecture & Lifecycle Governance (TOGAF Phase C - Data) | Found / Not found / Unable to assess | [What is covered or missing, with retrieved heading] |
+    | Integration Contracts & Interface Specifications (arc42 Runtime & Interfaces) | Found / Not found / Unable to assess | [What is covered or missing, with retrieved heading] |
+    | Quantified Non-Functional Requirements (arc42 & ATAM) | Found / Not found / Unable to assess | [What is covered or missing, with retrieved heading] |
+    | Security, Identity & Trust Boundaries (Zero Trust / TOGAF Security) | Found / Not found / Unable to assess | [What is covered or missing, with retrieved heading] |
+    | Deployment Topology, Operability & Verification (arc42 Deployment & Crosscutting) | Found / Not found / Unable to assess | [What is covered or missing, with retrieved heading] |
 
-    **Document Changes to Match Technical Recommendations**
-    * [Exact retrieved section/heading and proposed change, or "No document changes identified."]
+    #### Solution Complexity, Unknowns & Risk
+    **Architect's project risk opinion:** [Low | Medium | High | Unable to assess] —
+    [Short evidence-based reason.]
+    * **Complications:** [Main design or delivery complexities, or "None identified."]
+    * **Unknowns:** [Important unanswered questions, or "None identified."]
+    * **Risks:** [Main risks and why they matter, or "None identified."]
+
+    #### Documentation Errors & Contradictions
+    * [Only a specific, evidenced design mistake that would prevent the solution
+    working as described, or a contradiction between named sections. Explain its
+    effect and cite the retrieved heading(s). If none, write "None identified from
+    the reviewed evidence."]
+
+    #### Alignment with Reconciled Technical Feedback
+    * [Specific change needed in the document to match the reconciled technical
+    feedback, citing a retrieved heading; or "No documentation changes identified."]
 
 final_review_task:
   description: >
@@ -186,27 +207,28 @@ final_review_task:
 
     {user_request}
 
-    Rank the most important technical changes in priority order. Highlight high-risk
-    items and work that is especially complex, dependent, or uncertain. Explain briefly
-    why the top priorities matter, identify any tension between the technical and
-    document reviews, and provide an overview of the solution review as a whole.
-    Explain the summary in plain, simple language for a non-technical reader. Briefly
-    define unavoidable technical terms, use short sentences, and focus on what the
-    change means and why it matters without losing important technical risks or
-    implementation dependencies. Do not claim that suggested changes were implemented
-    in the user's solution.
+    Decide **Approved** only when the reviews identify no high-risk issues and no
+    major code or structural changes needed. Otherwise decide **Needs Revision**.
+    Summarize the proposed technical solution and how it aligns with the principles
+    actually assessed in the reviews. Also explain what the project appears to do
+    from a business point of view, grounded only in the review evidence. If that
+    purpose is unclear, say so rather than inventing details. Use plain, concise
+    language suitable for a non-technical reader. Do not claim suggested changes
+    have been implemented.
   expected_output: >
-    Return concise Markdown with these sections and no conversational filler:
+    Return concise Markdown with exactly these three sections and no conversational
+    filler:
 
-    #### Overall Solution Review
-    [Brief overall judgment in plain, simple language. Explain specialist terms if needed.]
+    #### Decision
+    **[Approved | Needs Revision]**
+    [Brief reason. Approved means no high-risk issues or major code/structural
+    changes were identified. Needs Revision means at least one was identified.]
 
-    **Priority Technical Changes**
-    1. [Highest-priority change, what it means, why it matters, risk, and complexity in simple language.]
-    2. [Next change, what it means, why it matters, risk, and complexity in simple language.]
+    #### Technical Solution Summary
+    [Briefly summarize the proposed technical solution and how well it aligns with
+    the principles assessed by the specialist and solution-document reviews.
+    Mention any significant risks or major changes that inform the decision.]
 
-    **High-Risk or Complex Areas**
-    * [Risk, dependency, or uncertainty explained simply, or "None identified."]
-
-    **Solution Document Alignment**
-    * [In simple language, how the document review aligns with or qualifies the technical recommendations.]
+    #### Business Understanding
+    [Briefly summarize what the project appears to do and its business purpose,
+    based only on the review evidence. If unclear, say "Not clear from the reviews."]

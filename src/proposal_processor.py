@@ -1,8 +1,10 @@
 # src/proposal_processor.py
+import logging
 import os
 import re
 import tempfile
 import shutil
+import time
 import docx
 import fitz  # PyMuPDF
 import chromadb
@@ -11,6 +13,9 @@ import boto3
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from crewai.tools import BaseTool
 from pydantic import BaseModel, Field, PrivateAttr
+
+
+logger = logging.getLogger(__name__)
 
 
 class ProposalProcessor:
@@ -24,6 +29,15 @@ class ProposalProcessor:
     @classmethod
     def process_file(cls, file_path: str, backend_choice: str, progress_callback=None) -> str:
         """Extracts text and diagrams, describes visuals, and builds a searchable session index."""
+        started = time.perf_counter()
+        _, raw_ext = os.path.splitext(file_path)
+        ext = raw_ext.lower()
+        logger.info(
+            "Proposal processing started file_type=%s file_size_bytes=%d backend=%s",
+            ext,
+            os.path.getsize(file_path),
+            backend_choice,
+        )
         os.makedirs(cls._SESSION_DB_PATH, exist_ok=True)
         client = chromadb.PersistentClient(path=cls._SESSION_DB_PATH)
 
@@ -34,8 +48,6 @@ class ProposalProcessor:
             pass  # Collection does not exist yet on first run
 
         temp_img_dir = tempfile.mkdtemp(prefix="proposal_imgs_")
-        _, raw_ext = os.path.splitext(file_path)
-        ext = raw_ext.lower()
 
         try:
             if progress_callback:
@@ -51,6 +63,13 @@ class ProposalProcessor:
                 raise ValueError(f"Unsupported file format: {ext}. Upload .docx, .pdf, or .md.")
 
             total_images = sum(len(s["images"]) for s in sections)
+            logger.info(
+                "Proposal extraction completed sections=%d diagrams=%d "
+                "duration_seconds=%.2f",
+                len(sections),
+                total_images,
+                time.perf_counter() - started,
+            )
             img_counter = 0
 
             for section in sections:
@@ -62,6 +81,12 @@ class ProposalProcessor:
                             f"Analysing diagram {img_counter}/{total_images} "
                             f"under '{section['heading']}'..."
                         )
+                    logger.info(
+                        "Proposal diagram analysis started diagram=%d total=%d backend=%s",
+                        img_counter,
+                        total_images,
+                        backend_choice,
+                    )
                     desc = cls._describe_diagram(img_path, section["heading"], backend_choice)
                     diagram_descriptions.append(f"[Extracted Diagram Description]:\n{desc}")
 
@@ -79,8 +104,24 @@ class ProposalProcessor:
                 f"Sections: {len(sections)} | Diagrams Analysed: {total_images}\n"
                 f"Document Outline: {', '.join(toc[:25])}"
             )
+            logger.info(
+                "Proposal processing completed sections=%d diagrams=%d "
+                "duration_seconds=%.2f",
+                len(sections),
+                total_images,
+                time.perf_counter() - started,
+            )
             return summary
 
+        except Exception as error:
+            logger.error(
+                "Proposal processing failed file_type=%s error_type=%s "
+                "duration_seconds=%.2f",
+                ext,
+                type(error).__name__,
+                time.perf_counter() - started,
+            )
+            raise
         finally:
             shutil.rmtree(temp_img_dir, ignore_errors=True)
 
@@ -167,6 +208,7 @@ class ProposalProcessor:
     @classmethod
     def _describe_diagram(cls, img_path: str, section_heading: str, backend_choice: str) -> str:
         """Uses a Vision LLM to convert an architecture/flow diagram into structured text."""
+        started = time.perf_counter()
         vision_prompt = (
             f"You are a Principal Solutions Architect analysing a diagram from the section '{section_heading}' "
             "of a technical proposal. Break down the visual intent completely:\n"
@@ -187,6 +229,11 @@ class ProposalProcessor:
                         "images": [img_path]
                     }]
                 )
+                logger.info(
+                    "Proposal diagram analysis completed backend=%s duration_seconds=%.2f",
+                    backend_choice,
+                    time.perf_counter() - started,
+                )
                 return response["message"]["content"]
             else:
                 # AWS Bedrock Claude 3.5 Sonnet Vision via boto3 converse API
@@ -206,8 +253,20 @@ class ProposalProcessor:
                         ]
                     }]
                 )
+                logger.info(
+                    "Proposal diagram analysis completed backend=%s duration_seconds=%.2f",
+                    backend_choice,
+                    time.perf_counter() - started,
+                )
                 return response["output"]["message"]["content"][0]["text"]
         except Exception as e:
+            logger.error(
+                "Proposal diagram analysis failed backend=%s error_type=%s "
+                "duration_seconds=%.2f",
+                backend_choice,
+                type(e).__name__,
+                time.perf_counter() - started,
+            )
             return f"[Vision Analysis Failed for {os.path.basename(img_path)}: {str(e)}]"
 
     @classmethod
@@ -247,7 +306,9 @@ class ProposalProcessor:
     @classmethod
     def query_proposal(cls, search_query: str, n_results: int = 4) -> str:
         """Allows specialist agents to search specific parts of the uploaded 100-page proposal."""
+        started = time.perf_counter()
         if not os.path.exists(cls._SESSION_DB_PATH):
+            logger.warning("Proposal search requested without a session index")
             return "No proposal document was uploaded for this session."
         try:
             client = chromadb.PersistentClient(path=cls._SESSION_DB_PATH)
@@ -263,8 +324,18 @@ class ProposalProcessor:
                 f"[Proposal Section: {meta.get('section', 'Unknown')}]\n{doc}"
                 for doc, meta in zip(docs, metas)
             ]
+            logger.info(
+                "Proposal search completed result_count=%d duration_seconds=%.2f",
+                len(formatted),
+                time.perf_counter() - started,
+            )
             return "\n---\n".join(formatted) if formatted else "No matching sections found in proposal."
         except Exception as e:
+            logger.error(
+                "Proposal search failed error_type=%s duration_seconds=%.2f",
+                type(e).__name__,
+                time.perf_counter() - started,
+            )
             return f"Error querying uploaded proposal: {str(e)}"
 
 

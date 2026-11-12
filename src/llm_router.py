@@ -1,14 +1,22 @@
 # src/llm_router.py
+import logging
 import os
 from crewai import LLM
+
+logger = logging.getLogger(__name__)
+
 
 class LLMRouter:
     """Handles the abstraction, validation, and instantiation of swappable 
     compute infrastructures (LLM providers) for the application."""
 
+    _REQUEST_TIMEOUT_SECONDS = 90
+    _MAX_OUTPUT_TOKENS = 1024
+    _LOCAL_CONTEXT_TOKENS = 4096
+
     # Note: AWS Bedrock paths use the format: bedrock/<provider>.<model>
     _BACKEND_MAP = {
-        "Local Machine (Ollama - Llama 3.2)": {
+        "Local Machine (Ollama - Llama3.2:3b)": {
             "model_string": "ollama/llama3.2:3b",
             "base_url": "http://localhost:11434"
         },
@@ -34,6 +42,7 @@ class LLMRouter:
         config = cls._BACKEND_MAP[ui_choice]
         model_str = config["model_string"]
         base_url = config["base_url"]
+        logger.info("Initializing LLM backend=%s", ui_choice)
 
         # If the user selects the AWS Bedrock route, programmatically verify 
         # that their system environment has AWS keys set before calling the service.
@@ -43,11 +52,26 @@ class LLMRouter:
         try:
             # Instantiate the unified CrewAI wrapper. 
             # This object behaves identically regardless of the backing engine.
-            return LLM(
+            llm_options = {
+                "timeout": cls._REQUEST_TIMEOUT_SECONDS,
+                "max_tokens": cls._MAX_OUTPUT_TOKENS,
+            }
+            if model_str.startswith("ollama/"):
+                llm_options["num_ctx"] = cls._LOCAL_CONTEXT_TOKENS
+
+            llm = LLM(
                 model=model_str,
-                base_url=base_url
+                base_url=base_url,
+                **llm_options
             )
+            logger.info("LLM backend initialized model=%s", model_str)
+            return llm
         except Exception as e:
+            logger.error(
+                "LLM backend initialization failed model=%s error_type=%s",
+                model_str,
+                type(e).__name__,
+            )
             raise RuntimeError(
                 f"Failed to initialize compute connection for {model_str}. "
                 f"Details: {str(e)}"
