@@ -15,22 +15,57 @@ review_task:
     stated future or target state; if none is stated, identify the ambiguity instead
     of inventing a target.
 
-    Follow these strict evaluation rules:
-    1. Query your specialist knowledge base tool to retrieve the exact principles for your domain.
-    2. If an uploaded proposal exists, query the proposal search tool to inspect relevant code, flows, and diagrams.
-    3. Assign exactly ONE rating from the allowed rubric:
+    Keep recommendations specific and proportionate to the system's purpose, users,
+    data sensitivity, regulatory obligations, business impact, expected scale,
+    availability needs, lifecycle stage, and operating capacity. Apply frameworks
+    as evidence-based guidance, not as a requirement to adopt every listed practice.
+    A regulated or high-impact system may need stringent controls; a small,
+    low-sensitivity B2C service or personal project may need a lighter solution.
+    Do not assume a risk profile that the design does not establish; call out
+    important unknowns. Prefer the least complex change that adequately addresses
+    an evidenced risk, and explain its benefit and trade-off. Do not recommend
+    enterprise-scale controls such as multi-region deployment, extensive governance,
+    or dedicated 24/7 operations unless the solution's needs justify them.
+
+    If your assigned role is Testing & Verification Strategist, always assess the
+    test plan for the solution. State how well the documented plan covers the
+    described requirements and workflows; then list the key solution areas that
+    should be tested, with concrete scenarios, suitable test levels, and reasons
+    grounded in the testing knowledge base. Distinguish tests already described
+    from recommended coverage. If no test plan is described, say "Not stated" but
+    still recommend the most relevant test areas. This assessment is advisory and
+    must not determine the final implementation Pass/Fail decision.
+
+    Apply these evaluation rules:
+    1. Start with the specialist knowledge and proposal evidence already included in the review request.
+    2. Use the available search tools only if additional evidence is needed.
+    3. Never output a tool-call payload or raw tool JSON; return the completed assessment in the required format.
+    4. Assign exactly ONE rating from the allowed rubric, considering material
+       impact and the system context rather than treating every guideline as mandatory:
        - **Good**: Aligns well with core principles; no structural rework needed.
-       - **Fair**: Partially aligns, but has notable gaps, coupling, or missed patterns that require refactoring.
-       - **Bad**: Violates core principles or introduces major architectural risks.
+       - **Fair**: Has a material, evidenced gap that merits a meaningful improvement.
+       - **Bad**: Has an evidenced severe principle violation or major architectural risk.
        - **Not Applicable**: Your architectural specialty does not apply to this specific submission.
-    4. MINOR TWEAKS SUMMARY: Include a concise bulleted list of small, non-code improvements or
-       clarifications that are not covered by code snippets. If none exist, write "None."
-    5. CONDITIONAL CODE SNIPPETS: Provide concrete "Before / After" or recommended code/config snippets
+    5. MINOR TWEAKS SUMMARY: Include a concise bulleted list of small, non-code improvements or
+       clarifications that are not covered by code snippets. For every suggested
+       change, state its priority (Blocking, Recommended, or Optional), the specific
+       design location to update, and the concrete change. If none exist, write "None."
+    6. CONDITIONAL CODE SNIPPETS: Provide concrete "Before / After" or recommended code/config snippets
        ONLY IF your rating is **Fair** or **Bad**. If your rating is **Good** or **Not Applicable**,
        omit the code snippets section completely. When included, use the heading
        "Recommended Code / Structural Changes" after the minor tweaks summary. Never repeat
        template instructions or placeholders, and do not output an empty section.
-    6. CODE CHANGE LOCATIONS: Before every code or configuration snippet, state its target:
+    7. DESIGN AND CODE CHANGE LOCATIONS: For every proposed tweak, recommendation,
+       or structural change, identify the area of the solution documentation to
+       update:
+       - For a text-based document, cite the exact retrieved heading, page, figure,
+         table, or paragraph. If no suitable section exists, recommend a clearly
+         named section to add; do not invent an existing heading or page.
+       - For an image-only design, identify the visible diagram, component, flow,
+         or region to annotate or change. Do not invent document sections.
+       - If the exact location cannot be identified, say so and give the nearest
+         evidence-based area or section to add.
+       Before every code or configuration snippet, also state its code target:
        - For an existing file, give the exact filename/path visible in the submission and name the specific
          function, class, configuration key, or section to change.
        - For a new file, explicitly say "Create new file: <generic-filename>" and use a descriptive,
@@ -47,9 +82,30 @@ review_task:
     **General Assessment**
     [2–4 concise sentences evaluating how the solution performs against specific rules retrieved from your knowledge base.]
 
+    **Testing Plan Coverage** *(include only for Testing & Verification Strategist)*
+    **Coverage:** [Good | Fair | Poor | Not stated]
+    [Describe which requirements/workflows the documented plan covers and the
+    material gaps. "Not stated" means no plan was found, not that the solution
+    fails.]
+
+    **Key Areas to Test**
+    * [Specific scenario and suitable test level; explain why it matters using the
+      testing knowledge base and give the design location to update.]
+
     **Summary of Additional Minor Tweaks**
-    * [Small tweak or documentation clarification not covered by the code snippets below]
-    * [Additional minor tweak, or write "None." if no further tweaks are needed]
+    * **Priority:** [Blocking | Recommended | Optional] — **Design location:** [exact
+      heading/page/figure/diagram area, or a clearly named section to add] —
+      **Change:** [specific tweak and why it fits the solution]
+    * [Repeat as needed, or write "None." if no further tweaks are needed]
+
+    **Recommended Code / Structural Changes**
+    * **Priority:** [Blocking | Recommended | Optional] — **Design location:**
+      [exact area to update, or a clearly named section to add] —
+      **Code location:** [existing file and exact target, or "Create new file:
+      <generic-filename>"]
+    ```text
+    [Concrete, scoped change]
+    ```
 
 
 technical_reconciliation_task:
@@ -66,8 +122,11 @@ technical_reconciliation_task:
     Produce one clear, concise consolidated review. Identify genuine conflicts between
     recommendations. Resolve them by prioritizing evidence from the proposal and
     specialist knowledge; when both are comparably supported, favor the more in-depth
-    change. Combine compatible recommendations where doing so produces a coherent
-    solution. Do not combine incompatible approaches merely to include both.
+    change only when its benefit justifies the added complexity. Preserve the
+    specialists' risk-proportionate priorities and distinguish blocking changes from
+    recommended or optional improvements. Combine compatible recommendations where
+    doing so produces a coherent solution. Do not combine incompatible approaches
+    merely to include both.
 
     Return the feedback under the original specialist headings. Preserve unchanged
     feedback as that specialist's feedback. Where feedback conflicts, revise only the
@@ -81,6 +140,12 @@ technical_reconciliation_task:
     Any code or configuration snippet must identify its location first: give the
     existing file path and exact area to change, or explicitly say "Create new file:
     <generic-filename>". Do not invent filenames.
+
+    Preserve the design-document location for each recommendation. For text-based
+    proposals, keep the exact retrieved heading, page, figure, table, or paragraph;
+    when no such section exists, name a section to add rather than inventing one.
+    For image-only designs, identify the visible diagram area, component, or flow.
+    Do not omit, broaden, or invent locations when reconciling feedback.
 
     End with an appendix containing ONLY original feedback from specialist sections
     that you changed. For each changed section, include the specialist name and its
@@ -135,7 +200,11 @@ solution_document_review_task:
     "No matching evidence retrieved." For every documentation change, error, or
     contradiction, cite the exact retrieved section(s); if no section can be
     identified, say so without inventing a heading. Keep business-facing and
-    implementation-facing concerns clear and use plain language.
+    implementation-facing concerns clear and use plain language. For every
+    suggested documentation change, state its priority (Blocking, Recommended, or
+    Optional), the exact retrieved heading/page/figure/table to update, and the
+    concrete change. If the design is image-only, identify the visible diagram
+    component or region instead of inventing a document section.
 
     Report a project risk opinion (Low, Medium, High, or Unable to assess) based
     on evidence, explaining the main complications, unknowns, and risks. In the
@@ -196,8 +265,10 @@ solution_document_review_task:
     the reviewed evidence."]
 
     #### Alignment with Reconciled Technical Feedback
-    * [Specific change needed in the document to match the reconciled technical
-    feedback, citing a retrieved heading; or "No documentation changes identified."]
+    * **Priority:** [Blocking | Recommended | Optional] — **Design location:**
+    [Retrieved heading/page/figure/table or visible diagram area] — **Change:**
+    [Specific update needed to match the reconciled technical feedback.]
+    [If none, write "No documentation changes identified."]
 
 final_review_task:
   description: >
@@ -211,55 +282,82 @@ final_review_task:
     Make an implementation decision based on whether the design is likely to work
     and meet the functional requirements stated in the design. Give **Pass** when
     it is likely to do so and the reviews identify no architectural anti-pattern
-    or severe direct violation of a specialist domain. Give **Needs Revision** when
-    evidence indicates the design is unlikely to work, misses a stated functional
+    or severe direct violation of a specialist domain. Give **Fail** when evidence
+    indicates the design is unlikely to work, misses a stated functional
     requirement, introduces an anti-pattern, or contains a severe direct violation.
     A Fair/Bad specialist rating or ordinary improvement recommendation alone is
-    not a reason to block a pass; assess the specific evidence and severity.
-    Do not demand a perfect or fully specified design. Unknowns, non-blocking
-    omissions, and documentation quality alone do not fail implementation unless
-    they prevent a reasoned judgment that stated requirements will be met or expose
-    a blocking design risk.
+    not a reason to fail; assess the specific evidence and severity. Do not demand
+    a perfect or fully specified design. Unknowns, non-blocking omissions, and
+    documentation quality alone do not fail implementation unless they prevent a
+    reasoned judgment that stated requirements will be met or expose a blocking
+    design risk.
 
-    Summarize the proposed technical solution and how it aligns with the principles
-    actually assessed in the reviews. Include a general assessment of how clearly
-    the supplied documentation presents the solution, based only on the solution-
-    document peer review. Then assign a separate documentation-presentation rating:
-    Good for clear, coherent documentation that communicates the solution and its
-    important decisions; Fair for understandable documentation with material gaps
-    or ambiguity; Bad when the solution is materially unclear, contradictory, or
-    difficult to understand. Use Unable to assess only when no proposal was
-    provided or the peer review could not inspect it. The documentation rating must
-    not by itself determine the implementation decision.
+    If the decision is Fail, list the specific blocking changes required to satisfy
+    the Pass criteria. Order them by importance and include the source specialist
+    and the exact design-document area to update. For a text-based proposal, cite
+    its retrieved heading, page, figure, table, or paragraph; if a section is
+    missing, name a section to add rather than inventing an existing one. For an
+    image-only design, identify the visible diagram component or flow to change.
+    Do not list recommended or optional improvements as approval blockers. Never
+    list test-plan coverage gaps as a blocker or use the Testing & Verification
+    Strategist's rating to change the implementation decision. If the decision is
+    Pass, state that no blocking changes are required.
 
-    Also explain what the project appears to do from a business point of view,
-    grounded only in the review evidence. If that purpose is unclear, say so rather
-    than inventing details. Use plain, concise language suitable for a
-    non-technical reader. Do not claim suggested changes have been implemented.
+    Summarize the proposed solution and its business purpose in plain, succinct
+    language, grounded only in the review evidence. Further technical detail is
+    available in the agent-specific feedback. Do not claim suggested changes have
+    been implemented.
+
+    Rate the solution documentation using the solution-document peer review:
+    **Good** when it covers most important areas and only minor flaws or
+    contradictions are reported; **Fair** when some key areas are missing but the
+    document still adequately explains the project concept to business and
+    technical readers; **Bad** when vital information is missing for implementors
+    to complete the project or for the business to understand what it will receive.
+    Use Bad when no usable solution documentation was supplied or the review could
+    not assess it. The documentation rating must not by itself determine the
+    implementation decision. For Fair or Bad, list the specific areas to rework or
+    add; for Good, do not list documentation rework.
+
+    The Testing & Verification Strategist's report is advisory and must not affect
+    the implementation decision. Rate test-plan coverage **Good** when the plan
+    covers most important requirements and workflows with only minor gaps, **Fair**
+    when meaningful coverage exists but key areas are missing, and **Bad** when no
+    plan or very little relevant coverage is described. Summarize the coverage and
+    the most important areas to test, with concise knowledge-base rationale.
   expected_output: >
-    Return concise Markdown with exactly these four sections and no conversational
-    filler:
+    Return concise Markdown with exactly these seven sections in this exact order
+    and no conversational filler. Bold the labels only; keep each rating or
+    decision result plain text.
 
-    #### Implementation Decision
-    **[Pass | Needs Revision]**
-    [Brief evidence-based reason. Pass means the design is likely to work, meets
+    **Implementation Decision:** Pass / Fail
+    [Brief, evidence-based reason. Pass means the design is likely to work, meets
     stated functional requirements, and has no identified architectural
     anti-pattern or severe direct specialist violation. Ordinary recommendations
     alone do not prevent a pass.]
 
-    #### Technical Solution Summary
-    [Briefly summarize the proposed technical solution and how well it aligns with
-    the principles assessed by the specialists. Mention significant risks or
-    blocking issues that inform the implementation decision.]
+    **Changes Required for Pass**
+    * **Blocking change:** [Specific action] — **Source:** [Specialist] —
+      **Design location:** [Exact heading/page/figure/table or visible diagram
+      component; name a section to add if none exists.]
+    [If Pass, write "None — no blocking changes are required."]
 
-    #### Solution Documentation Assessment
-    **General assessment:** [A concise remark on how well the supplied documentation
-    communicates the solution, based on the solution-document peer review.]
+    **Solution Summary**
+    [Plain, succinct summary of the solution, its purpose, and important overall
+    findings. Further details are in the agent-specific feedback.]
 
-    **Documentation Presentation Rating: [Good | Fair | Bad | Unable to assess]**
-    [Brief reason based on the peer-review findings. Use Unable to assess only when
-    there was no proposal or the peer review could not inspect it.]
+    **Solution Document Rating:** Good / Fair / Bad
 
-    #### Business Understanding
-    [Briefly summarize what the project appears to do and its business purpose,
-    based only on the review evidence. If unclear, say "Not clear from the reviews."]
+    **Documentation Summary**
+    [Plain, succinct summary based on the solution-document peer review.]
+    [For Fair or Bad, add bullets naming the specific areas to rework or add. For
+    Good, omit this list.]
+
+    **Testing Plan Coverage:** Good / Fair / Bad
+
+    **Testing Summary**
+    [Plain, succinct summary of test-plan coverage and the highest-priority areas
+    to test, supported by the testing knowledge base.]
+    * [Important area and concise test scenario.]
+    * [Repeat for the highest-priority areas.]
+    Further detail is in the agent-specific feedback.

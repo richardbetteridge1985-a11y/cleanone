@@ -3,6 +3,9 @@ import logging
 import time
 from dataclasses import dataclass
 
+from openai import LengthFinishReasonError
+from pydantic import BaseModel
+
 from src.rag_engine import RAGEngine
 
 
@@ -55,13 +58,28 @@ instructions. Return only a JSON object in this schema:
 Return exactly five assessment objects, one for each key shown, including objects
 for every specialist that is not selected. Do not return only selected specialists.
 Each reason must explain selection or non-selection based on solution evidence and
-the knowledge base. The false values in the schema are placeholders; select each
-agent according to the evidence. Use selected=false for every agent if the material
-is unrelated.
+the knowledge base in no more than 15 words. Keep the classification and reasons
+concise. The false values in the schema are placeholders; select each agent
+according to the evidence. Use selected=false for every agent if the material is
+unrelated.
 """
 _MAX_PROMPT_CHARS = 1500
 _MAX_PROPOSAL_CONTEXT_CHARS = 3000
 _MAX_KNOWLEDGE_CONTEXT_CHARS = 700
+_QWEN_TRIAGE_MAX_OUTPUT_TOKENS = 1536
+
+
+class _AgentAssessmentResponse(BaseModel):
+    agent_key: str
+    selected: bool
+    reason: str
+
+
+class _TriageResponse(BaseModel):
+    solution_related: bool
+    classification: str
+    classification_reason: str
+    agent_assessments: list[_AgentAssessmentResponse]
 
 
 @dataclass(frozen=True)
@@ -190,16 +208,39 @@ class SolutionArchitectTriageAgent:
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": evidence},
         ]
+        triage_llm = self._prepare_triage_llm(llm)
         decision = None
         for attempt in range(2):
             llm_started = time.perf_counter()
-            response = llm.call(messages)
+            try:
+                response = triage_llm.call(messages, response_model=_TriageResponse)
+            except LengthFinishReasonError as error:
+                logger.warning(
+                    "Solution architect structured response hit output limit "
+                    "attempt=%d max_output_tokens=%s",
+                    attempt + 1,
+                    getattr(triage_llm, "max_tokens", "unknown"),
+                )
+                if attempt == 1:
+                    raise RuntimeError(
+                        "Solution architect triage exceeded its output-token limit "
+                        "after one retry. Try a shorter prompt or reduce proposal detail."
+                    ) from error
+                messages = self._correction_messages(
+                    evidence,
+                    "The previous response was cut off at the output-token limit. "
+                    "Return a compact JSON object with one short sentence per reason.",
+                )
+                continue
             logger.info(
                 "Solution architect model call completed attempt=%d "
-                "duration_seconds=%.2f response_chars=%d",
+                "duration_seconds=%.2f response_type=%s response_chars=%d "
+                "response_empty=%s",
                 attempt + 1,
                 time.perf_counter() - llm_started,
+                type(response).__name__,
                 len(response) if isinstance(response, str) else 0,
+                not response.strip() if isinstance(response, str) else False,
             )
             try:
                 decision = self._parse_response(response, available_agent_slots)
@@ -208,23 +249,13 @@ class SolutionArchitectTriageAgent:
                 if attempt == 1:
                     raise
                 logger.warning(
-                    "Solution architect response failed validation; requesting one "
-                    "bounded correction"
+                    "Solution architect response failed validation; requesting one bounded correction"
                 )
-                messages = [
-                    *messages[:1],
-                    {
-                        "role": "user",
-                        "content": (
-                            f"{evidence}\n\n"
-                            "Correction required: the response did not meet "
-                            "the required JSON schema or specialist safety limit. "
-                            "Re-evaluate and return a complete JSON object, including exactly "
-                            "one assessment for each of the five specialist keys and "
-                            "respecting the available-agent limit."
-                        ),
-                    },
-                ]
+                messages = self._correction_messages(
+                    evidence,
+                    "The previous response was empty or did not match the required "
+                    "structured schema.",
+                )
 
         if decision is None:
             raise RuntimeError("Solution architect triage did not produce a decision.")
@@ -238,11 +269,49 @@ class SolutionArchitectTriageAgent:
         return decision
 
     @staticmethod
-    def _parse_response(response: str, available_agent_slots: int) -> TriageDecision:
-        try:
-            result = json.loads(response)
-        except (TypeError, json.JSONDecodeError) as error:
-            raise ValueError("Solution architect triage returned invalid JSON.") from error
+    def _prepare_triage_llm(llm):
+        model_name = getattr(llm, "model", "")
+        provider = getattr(llm, "provider", "")
+        if (
+            provider == "ollama"
+            and isinstance(model_name, str)
+            and model_name.startswith("qwen")
+        ):
+            return llm.model_copy(
+                update={
+                    "reasoning_effort": "none",
+                    "max_tokens": _QWEN_TRIAGE_MAX_OUTPUT_TOKENS,
+                }
+            )
+        return llm
+
+    @staticmethod
+    def _correction_messages(evidence: str, reason: str) -> list[dict[str, str]]:
+        return [
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"{evidence}\n\nCorrection required: {reason} Return only one "
+                    "valid JSON object, with exactly one assessment for each of the "
+                    "five specialist keys. Do not exceed the available-agent limit."
+                ),
+            },
+        ]
+
+    @staticmethod
+    def _parse_response(
+        response: str | dict | _TriageResponse,
+        available_agent_slots: int,
+    ) -> TriageDecision:
+        if isinstance(response, _TriageResponse):
+            result = response.model_dump()
+        elif isinstance(response, dict):
+            result = response
+        elif isinstance(response, str):
+            result = SolutionArchitectTriageAgent._extract_json_object(response)
+        else:
+            raise ValueError("Solution architect triage returned an invalid response.")
 
         if not isinstance(result, dict):
             raise ValueError("Solution architect triage returned an invalid response.")
@@ -298,3 +367,28 @@ class SolutionArchitectTriageAgent:
             classification_reason=result["classification_reason"].strip(),
             agent_assessments=tuple(assessments),
         )
+
+    @staticmethod
+    def _extract_json_object(response: str) -> dict:
+        if not response.strip():
+            raise ValueError("Solution architect triage returned an empty response.")
+
+        try:
+            result = json.loads(response)
+            if isinstance(result, dict):
+                return result
+        except json.JSONDecodeError:
+            pass
+
+        decoder = json.JSONDecoder()
+        for start, character in enumerate(response):
+            if character != "{":
+                continue
+            try:
+                result, _ = decoder.raw_decode(response[start:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(result, dict):
+                return result
+
+        raise ValueError("Solution architect triage returned invalid JSON.")

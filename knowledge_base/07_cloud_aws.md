@@ -1,3 +1,23 @@
+# Applying the AWS Well-Architected Framework Proportionately
+
+Use the six pillars below as prompts to find material risks and trade-offs, not as
+a scorecard that every solution must satisfy in full. Tailor advice to the system's
+purpose, data sensitivity, regulatory obligations, business impact, expected scale
+and availability, lifecycle stage, team capacity, and budget. A fintech or other
+regulated, high-impact service may need stringent security, audit, resilience, and
+recovery controls. A small low-sensitivity B2C service or personal project can use
+simpler controls when the consequences and requirements justify them. Do not infer
+regulatory status, traffic, or criticality that the proposal does not state.
+
+For each recommendation, explain the risk it addresses, its expected benefit, and
+its cost or operational trade-off. Prioritize a small, viable AWS-native change
+over an enterprise-scale redesign when both address the evidenced need. Label
+changes as Blocking, Recommended, or Optional. Practices such as multi-account
+governance, multi-region failover, 100% IaC, extensive game days, and 24/7
+operations are conditional on workload risk and organizational requirements, not
+universal prerequisites. Never treat a stated legal or regulatory obligation as
+optional.
+
 # AWS Architecture & Well-Architected Framework Assessment Checklist
 
 ## The Six Pillars of the AWS Well-Architected Framework

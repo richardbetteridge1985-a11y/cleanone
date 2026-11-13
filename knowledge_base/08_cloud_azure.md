@@ -1,3 +1,23 @@
+# Applying the Azure Well-Architected Framework Proportionately
+
+Use the framework pillars and checks below to identify relevant risks and
+trade-offs; they are not a mandatory scorecard for every workload. Tailor
+recommendations to the system's purpose, data sensitivity, regulatory obligations,
+business impact, expected scale and availability, lifecycle stage, team capacity,
+and budget. A fintech or other regulated, high-impact service may need stringent
+security, audit, resilience, and recovery controls. A small low-sensitivity B2C
+service or personal project can use simpler controls when the consequences and
+requirements justify them. Do not infer regulatory status, traffic, or criticality
+that the proposal does not state.
+
+For each recommendation, explain the risk it addresses, its expected benefit, and
+its cost or operational trade-off. Prefer a small viable Azure-native improvement
+over an enterprise-scale redesign when it adequately addresses the evidenced need.
+Label changes as Blocking, Recommended, or Optional. Multi-region deployment,
+landing-zone governance, 24/7 operations, and other heavyweight practices are
+conditional on workload risk and organizational requirements, not universal
+prerequisites. Never treat a stated legal or regulatory obligation as optional.
+
 # Azure Architecture & Well-Architected Framework Assessment Checklist
 
 ## The Five Pillars of the Azure Well-Architected Framework

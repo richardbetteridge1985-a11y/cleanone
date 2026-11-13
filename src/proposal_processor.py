@@ -6,10 +6,11 @@ import tempfile
 import shutil
 import time
 import docx
-import fitz  # PyMuPDF
+import pymupdf
 import chromadb
 import ollama
 import boto3
+from botocore.config import Config
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from crewai.tools import BaseTool
 from pydantic import BaseModel, Field, PrivateAttr
@@ -19,12 +20,15 @@ logger = logging.getLogger(__name__)
 
 
 class ProposalProcessor:
-    """Parses large .docx, .pdf, and .md proposals, translates embedded diagrams 
-    into structured architectural descriptions via Vision LLMs, and indexes the 
-    proposal into a temporary session vector store."""
+    """Extracts proposal content and stores it in a local review-scoped vector index."""
 
     _SESSION_DB_PATH = os.path.join("config", "session_proposal_db")
     _COLLECTION_NAME = "active_proposal"
+    _MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+    _MAX_DIAGRAMS_PER_UPLOAD = 5
+    _VISION_TIMEOUT_SECONDS = 120
+    _LOCAL_VISION_MAX_OUTPUT_TOKENS = 512
+    _OLLAMA_VISION_MODEL = os.getenv("CLEANONE_OLLAMA_VISION_MODEL", "qwen3.5:9b")
     _SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
     _SUPPORTED_EXTENSIONS = {".docx", ".pdf", ".md"} | _SUPPORTED_IMAGE_EXTENSIONS
 
@@ -39,20 +43,27 @@ class ProposalProcessor:
                 f"Unsupported file format: {ext or '[no extension]'}. "
                 "Upload .docx, .pdf, .md, .png, .jpg, or .jpeg."
             )
+        file_size_bytes = os.path.getsize(file_path)
+        if file_size_bytes > cls._MAX_UPLOAD_BYTES:
+            raise ValueError(
+                f"Upload exceeds the {cls._MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit."
+            )
         logger.info(
             "Proposal processing started file_type=%s file_size_bytes=%d backend=%s",
             ext,
-            os.path.getsize(file_path),
+            file_size_bytes,
             backend_choice,
         )
         os.makedirs(cls._SESSION_DB_PATH, exist_ok=True)
         client = chromadb.PersistentClient(path=cls._SESSION_DB_PATH)
 
-        # Cleanly reset the collection via ChromaDB's API rather than deleting the folder on disk
-        try:
+        # Replace the prior proposal index without masking storage failures.
+        collection_names = {
+            collection if isinstance(collection, str) else collection.name
+            for collection in client.list_collections()
+        }
+        if cls._COLLECTION_NAME in collection_names:
             client.delete_collection(name=cls._COLLECTION_NAME)
-        except Exception:
-            pass  # Collection does not exist yet on first run
 
         temp_img_dir = tempfile.mkdtemp(prefix="proposal_imgs_")
 
@@ -76,6 +87,12 @@ class ProposalProcessor:
                 raise ValueError(f"Unsupported file format: {ext}")
 
             total_images = sum(len(s["images"]) for s in sections)
+            if total_images > cls._MAX_DIAGRAMS_PER_UPLOAD:
+                raise ValueError(
+                    f"Proposal contains {total_images} diagrams; the limit is "
+                    f"{cls._MAX_DIAGRAMS_PER_UPLOAD}. Reduce the number of diagrams "
+                    "or split the proposal before reviewing it."
+                )
             logger.info(
                 "Proposal extraction completed sections=%d diagrams=%d "
                 "duration_seconds=%.2f",
@@ -84,6 +101,12 @@ class ProposalProcessor:
                 time.perf_counter() - started,
             )
             img_counter = 0
+            analysed_images = 0
+            failed_images = 0
+            vision_failure_reason = None
+            vision_preflight_error = None
+            if total_images and "Ollama" in backend_choice:
+                vision_preflight_error = cls._check_ollama_vision_model()
 
             for section in sections:
                 diagram_descriptions = []
@@ -100,8 +123,24 @@ class ProposalProcessor:
                         total_images,
                         backend_choice,
                     )
-                    desc = cls._describe_diagram(img_path, section["heading"], backend_choice)
-                    diagram_descriptions.append(f"[Extracted Diagram Description]:\n{desc}")
+                    if vision_preflight_error:
+                        desc = vision_preflight_error
+                    else:
+                        desc = cls._describe_diagram(
+                            img_path, section["heading"], backend_choice
+                        )
+
+                    if desc.startswith("[Vision Analysis Failed:"):
+                        failed_images += 1
+                        vision_failure_reason = vision_failure_reason or desc.strip("[]")
+                        diagram_descriptions.append(
+                            "[Diagram image present; vision analysis failed.]"
+                        )
+                    else:
+                        analysed_images += 1
+                        diagram_descriptions.append(
+                            f"[Extracted Diagram Description]:\n{desc}"
+                        )
 
                 if diagram_descriptions:
                     section["text"] += "\n\n" + "\n\n".join(diagram_descriptions)
@@ -120,14 +159,23 @@ class ProposalProcessor:
             toc = [s["heading"] for s in sections if s["heading"]]
             summary = (
                 f"Proposal File: {os.path.basename(file_path)} | "
-                f"Sections: {len(sections)} | Diagrams Analysed: {total_images}\n"
-                f"Document Outline: {', '.join(toc[:25])}"
+                f"Sections: {len(sections)} | Diagrams Analysed: "
+                f"{analysed_images}/{total_images}; Analysis Failures: {failed_images}\n"
+                + (
+                    f"Vision Analysis Note: {vision_failure_reason}\n"
+                    if vision_failure_reason
+                    else ""
+                )
+                + f"Document Outline: {', '.join(toc[:25])}"
             )
             logger.info(
                 "Proposal processing completed sections=%d diagrams=%d "
+                "diagrams_analysed=%d diagram_analysis_failures=%d "
                 "duration_seconds=%.2f",
                 len(sections),
                 total_images,
+                analysed_images,
+                failed_images,
                 time.perf_counter() - started,
             )
             return summary
@@ -142,7 +190,88 @@ class ProposalProcessor:
             )
             raise
         finally:
-            shutil.rmtree(temp_img_dir, ignore_errors=True)
+            try:
+                shutil.rmtree(temp_img_dir)
+            except OSError as error:
+                logger.warning(
+                    "Proposal temporary image cleanup failed error_type=%s",
+                    type(error).__name__,
+                )
+
+    @classmethod
+    def _check_ollama_vision_model(cls) -> str | None:
+        """Check model availability once so a missing model does not fail per diagram."""
+        try:
+            client = ollama.Client(timeout=10)
+            response = client.list()
+        except Exception as error:
+            logger.warning(
+                "Ollama vision model preflight failed model=%s error_type=%s",
+                cls._OLLAMA_VISION_MODEL,
+                type(error).__name__,
+            )
+            return (
+                f"[Vision Analysis Failed: Ollama could not verify the configured "
+                f"vision model '{cls._OLLAMA_VISION_MODEL}'.]"
+            )
+
+        models = (
+            response.get("models", [])
+            if isinstance(response, dict)
+            else getattr(response, "models", [])
+        )
+        available_models = set()
+        for model in models:
+            if isinstance(model, dict):
+                name = model.get("model") or model.get("name")
+            else:
+                name = getattr(model, "model", None) or getattr(model, "name", None)
+            if name:
+                available_models.add(name)
+
+        if cls._OLLAMA_VISION_MODEL in available_models:
+            try:
+                details = client.show(cls._OLLAMA_VISION_MODEL)
+            except Exception as error:
+                logger.warning(
+                    "Ollama vision model capability check failed model=%s error_type=%s",
+                    cls._OLLAMA_VISION_MODEL,
+                    type(error).__name__,
+                )
+                return (
+                    f"[Vision Analysis Failed: Ollama could not verify that "
+                    f"'{cls._OLLAMA_VISION_MODEL}' supports image input.]"
+                )
+
+            capabilities = (
+                details.get("capabilities", [])
+                if isinstance(details, dict)
+                else getattr(details, "capabilities", [])
+            )
+            if capabilities and "vision" not in capabilities:
+                logger.warning(
+                    "Ollama model lacks vision capability model=%s capabilities=%s",
+                    cls._OLLAMA_VISION_MODEL,
+                    ",".join(capabilities),
+                )
+                return (
+                    f"[Vision Analysis Failed: Ollama model "
+                    f"'{cls._OLLAMA_VISION_MODEL}' does not support image input. "
+                    "Set CLEANONE_OLLAMA_VISION_MODEL to an installed vision-capable model.]"
+                )
+            return None
+
+        logger.warning(
+            "Ollama vision model unavailable model=%s installed_model_count=%d",
+            cls._OLLAMA_VISION_MODEL,
+            len(available_models),
+        )
+        return (
+            f"[Vision Analysis Failed: Ollama vision model "
+            f"'{cls._OLLAMA_VISION_MODEL}' is not installed. Install a vision-capable "
+            "model or set CLEANONE_OLLAMA_VISION_MODEL to an installed one. "
+            "CleanOne will not download models automatically.]"
+        )
 
     @classmethod
     def _extract_docx(cls, file_path: str, img_dir: str) -> list[dict]:
@@ -154,7 +283,7 @@ class ProposalProcessor:
         # Map relationship IDs to extracted image files
         rel_to_img = {}
         for rel_id, rel in doc.part.rels.items():
-            if "image" in rel.target_ref:
+            if rel.reltype.endswith("/image") and not rel.is_external:
                 img_ext = os.path.splitext(rel.target_ref)[1] or ".png"
                 img_path = os.path.join(img_dir, f"docx_img_{img_index}{img_ext}")
                 with open(img_path, "wb") as f:
@@ -181,28 +310,30 @@ class ProposalProcessor:
     @classmethod
     def _extract_pdf(cls, file_path: str, img_dir: str) -> list[dict]:
         """Extracts text and embedded images page-by-page from a PDF."""
-        pdf = fitz.open(file_path)
         sections = []
+        with pymupdf.open(file_path) as pdf:
+            for page_num, page in enumerate(pdf, start=1):
+                text = page.get_text("text").strip()
+                images = []
+                for img_idx, img_info in enumerate(page.get_images(full=True)):
+                    xref = img_info[0]
+                    base_img = pdf.extract_image(xref)
+                    # Skip tiny icons/logos (< 150px) to avoid wasting Vision LLM calls.
+                    if base_img["width"] < 150 or base_img["height"] < 150:
+                        continue
+                    img_path = os.path.join(
+                        img_dir,
+                        f"page_{page_num}_img_{img_idx}.{base_img['ext']}",
+                    )
+                    with open(img_path, "wb") as f:
+                        f.write(base_img["image"])
+                    images.append(img_path)
 
-        for page_num, page in enumerate(pdf, start=1):
-            text = page.get_text("text").strip()
-            images = []
-            for img_idx, img_info in enumerate(page.get_images(full=True)):
-                xref = img_info[0]
-                base_img = pdf.extract_image(xref)
-                # Skip tiny icons/logos (< 150px) to avoid wasting Vision LLM calls
-                if base_img["width"] < 150 or base_img["height"] < 150:
-                    continue
-                img_path = os.path.join(img_dir, f"page_{page_num}_img_{img_idx}.{base_img['ext']}")
-                with open(img_path, "wb") as f:
-                    f.write(base_img["image"])
-                images.append(img_path)
-
-            sections.append({
-                "heading": f"Page {page_num}",
-                "text": text,
-                "images": images
-            })
+                sections.append({
+                    "heading": f"Page {page_num}",
+                    "text": text,
+                    "images": images,
+                })
 
         return sections
 
@@ -240,13 +371,16 @@ class ProposalProcessor:
 
         try:
             if "Ollama" in backend_choice:
-                response = ollama.chat(
-                    model="llama3.2-vision",
+                response = ollama.Client(
+                    timeout=cls._VISION_TIMEOUT_SECONDS
+                ).chat(
+                    model=cls._OLLAMA_VISION_MODEL,
                     messages=[{
                         "role": "user",
                         "content": vision_prompt,
                         "images": [img_path]
-                    }]
+                    }],
+                    options={"num_predict": cls._LOCAL_VISION_MAX_OUTPUT_TOKENS},
                 )
                 logger.info(
                     "Proposal diagram analysis completed backend=%s duration_seconds=%.2f",
@@ -261,7 +395,14 @@ class ProposalProcessor:
                 ext = os.path.splitext(img_path)[1].lower().lstrip(".")
                 img_format = "jpeg" if ext in ("jpg", "jpeg") else "png"
 
-                bedrock = boto3.client("bedrock-runtime")
+                bedrock = boto3.client(
+                    "bedrock-runtime",
+                    config=Config(
+                        connect_timeout=10,
+                        read_timeout=cls._VISION_TIMEOUT_SECONDS,
+                        retries={"total_max_attempts": 1},
+                    ),
+                )
                 response = bedrock.converse(
                     modelId="anthropic.claude-3-5-sonnet-20241022-v2:0",
                     messages=[{
@@ -286,7 +427,15 @@ class ProposalProcessor:
                 type(e).__name__,
                 time.perf_counter() - started,
             )
-            return f"[Vision Analysis Failed for {os.path.basename(img_path)}: {str(e)}]"
+            model_name = (
+                cls._OLLAMA_VISION_MODEL
+                if "Ollama" in backend_choice
+                else "AWS Bedrock Claude 3.5 Sonnet"
+            )
+            return (
+                f"[Vision Analysis Failed: diagram could not be processed by "
+                f"'{model_name}' ({type(e).__name__}).]"
+            )
 
     @classmethod
     def _index_sections(cls, sections: list[dict]):
@@ -308,11 +457,11 @@ class ProposalProcessor:
             chunks = splitter.split_text(section["text"])
             for chunk in chunks:
                 collection.add(
-                documents=[chunk],
-                metadatas=[{"section": section["heading"]}],
-                ids=[f"prop_chunk_{chunk_id}"]
-            )
-            chunk_id += 1
+                    documents=[chunk],
+                    metadatas=[{"section": section["heading"]}],
+                    ids=[f"prop_chunk_{chunk_id}"],
+                )
+                chunk_id += 1
 
     @classmethod
     def get_indexed_proposal_text(cls) -> str:

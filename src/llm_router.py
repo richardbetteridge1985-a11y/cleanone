@@ -1,6 +1,5 @@
 # src/llm_router.py
 import logging
-import os
 import time
 from crewai import LLM
 
@@ -12,7 +11,7 @@ class LLMRouter:
     compute infrastructures (LLM providers) for the application."""
 
     _REQUEST_TIMEOUT_SECONDS = 90
-    _MAX_OUTPUT_TOKENS = 1024
+    _LOCAL_MAX_OUTPUT_TOKENS = 1024
 
     # Note: AWS Bedrock paths use the format: bedrock/<provider>.<model>
     _BACKEND_MAP = {
@@ -20,7 +19,12 @@ class LLMRouter:
             "model_string": "ollama/llama3.2:3b",
             "base_url": "http://localhost:11434"
         },
-        "Enterprise Cloud (AWS Bedrock - Claude 3.5 Sonnet)": {
+        "Local Machine (Ollama - Qwen3.5:9b)": {
+            "model_string": "ollama/qwen3.5:9b",
+            "base_url": "http://localhost:11434",
+            "reasoning_effort": "none",
+        },
+        "Enterprise Cloud (AWS Bedrock - Claude 3.5 Sonnet) - NOT IMPLEMENTED": {
             "model_string": "bedrock/anthropic.claude-3-5-sonnet-v1:0",
             "base_url": None
         }
@@ -44,19 +48,15 @@ class LLMRouter:
         base_url = config["base_url"]
         logger.info("Initializing LLM backend=%s", ui_choice)
 
-        # If the user selects the AWS Bedrock route, programmatically verify 
-        # that their system environment has AWS keys set before calling the service.
-        if model_str.startswith("bedrock/"):
-            cls._verify_aws_credentials()
-
         started = time.perf_counter()
         try:
             # Instantiate the unified CrewAI wrapper. 
             # This object behaves identically regardless of the backing engine.
-            llm_options = {
-                "timeout": cls._REQUEST_TIMEOUT_SECONDS,
-                "max_tokens": cls._MAX_OUTPUT_TOKENS,
-            }
+            llm_options = {"timeout": cls._REQUEST_TIMEOUT_SECONDS}
+            if model_str.startswith("ollama/"):
+                llm_options["max_tokens"] = cls._LOCAL_MAX_OUTPUT_TOKENS
+            if "reasoning_effort" in config:
+                llm_options["reasoning_effort"] = config["reasoning_effort"]
 
             llm = LLM(
                 model=model_str,
@@ -80,16 +80,4 @@ class LLMRouter:
             raise RuntimeError(
                 f"Failed to initialize compute connection for {model_str}. "
                 f"Details: {str(e)}"
-            )
-
-    @staticmethod
-    def _verify_aws_credentials():
-        """Internal helper to ensure enterprise environment parameters are accessible."""
-        required_vars = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_DEFAULT_REGION"]
-        missing_vars = [var for var in required_vars if not os.environ.get(var)]
-
-        if missing_vars:
-            raise EnvironmentError(
-                f"Missing required AWS Environment Variables for Bedrock authentication: {missing_vars}. "
-                f"Please configure these inside your local environment or VS Code launch settings."
             )

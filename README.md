@@ -36,13 +36,20 @@ review stages run afterward.
 
 The final review distinguishes implementation readiness from document quality:
 
-- **Implementation decision:** Pass or Needs Revision. A design can pass when it
+- **Implementation decision:** Pass or Fail. A design can pass when it
   is likely to work and meet its stated functional requirements, provided the
   reviews identify no architectural anti-pattern or severe direct violation.
   Ordinary recommendations alone do not block a pass.
-- **Documentation presentation rating:** Good, Fair, or Bad, with Unable to assess
-  used when there is no document to review. This rating is reported separately
-  and does not by itself determine the implementation decision.
+- **Changes required for Pass:** If revision is needed, the final review lists
+  only blocking changes, ordered by importance and tied to the responsible
+  specialist and design-document area. Test-plan gaps are not approval blockers.
+- **Testing plan coverage:** The final review summarizes how well the documented
+  plan covers the solution and names key scenarios to test. This is advisory and
+  does not affect the implementation decision.
+- **Solution document rating:** Good when most important areas are covered with
+  only minor flaws; Fair when key areas are missing but the concept remains clear
+  to business and technical readers; Bad when vital information is missing for
+  implementation or business understanding. Fair/Bad reports list areas to rework.
 
 ## Review agents
 
@@ -68,18 +75,26 @@ with a reason rather than treated as design defects.
 - **Non-Functional Requirements (NFR) Architect** — Reviews scalability,
   performance, security, observability, resilience, availability, and fault
   tolerance.
-- **Testing & Verification Strategist** — Assesses testability, testing
-  boundaries, and unit, integration, and contract-testing approaches.
+- **Testing & Verification Strategist** — Runs in every Smart Panel review to
+  assess test-plan coverage and identify key scenarios and suitable test levels,
+  such as unit, integration, and contract tests. Its findings are advisory.
 - **AWS Cloud Infrastructure Architect** — Reviews AWS services, IAM, networking,
-  and managed infrastructure when AWS is present.
+  and managed infrastructure against the AWS Well-Architected Framework when AWS
+  is present.
 - **Azure Cloud Infrastructure Architect** — Reviews Azure services, identity,
-  networking, and platform patterns when Azure is present.
+  networking, and platform patterns against Azure's Well-Architected guidance.
 - **GCP Cloud Infrastructure Architect** — Reviews Google Cloud services, IAM,
-  data pipelines, and container or serverless topologies when GCP is present.
+  data pipelines, and container or serverless topologies against Google's
+  Well-Architected guidance when GCP is present.
 
 The triage agent selects the five core lenses (DDD, Clean Architecture, CQRS, EDA,
-and NFR) according to solution context. Testing and cloud specialists use the
-existing prompt/document keyword-routing rules. All specialists are instructed to
+and NFR) according to solution context. The testing specialist always runs in the
+Smart Panel; cloud specialists use the existing prompt/document keyword-routing
+rules. Cloud framework practices are treated as guidance, not a universal
+checklist: recommendations are scaled to the proposal's sensitivity, regulation,
+business impact, expected workload, operational capacity, and budget. A fintech
+system may warrant stringent controls; a personal or small low-risk service may
+need simpler safeguards. All specialists are instructed to
 treat “As Is”, current-process, and current-state examples as context, not as the
 target design.
 
@@ -181,14 +196,54 @@ root:
 python main.py
 ```
 
-The Gradio interface binds to `127.0.0.1:7860`. The local backend uses Ollama with
-`llama3.2:3b` at `http://localhost:11434`. The AWS Bedrock backend requires
-`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_DEFAULT_REGION` to be
-configured in the environment.
+The Gradio interface binds to `127.0.0.1:7860`. Local text inference offers
+`llama3.2:3b` and `qwen3.5:9b` through Ollama at `http://localhost:11434`. The AWS
+Bedrock backend uses the standard AWS SDK credential chain (for example,
+environment credentials, shared profiles/SSO, or an attached role) and requires
+an AWS region from the environment or shared configuration.
+
+Uploads are limited to 25 MB and five diagrams per proposal. A proposal exceeding
+either limit is rejected before vision analysis begins. Each diagram-analysis
+request has a 120-second timeout. The local text backend uses `llama3.2:3b`;
+diagram analysis uses the vision-capable Ollama model `qwen3.5:9b` by default.
+Install that model locally before reviewing diagrams, or set
+`CLEANONE_OLLAMA_VISION_MODEL` to another already-installed vision-capable model.
+CleanOne checks that the configured model is installed and will not download it
+automatically. If vision analysis is unavailable, the text review continues and
+the proposal-processing status reports that the diagrams could not be analysed.
+
+### Local model sizing and token safeguards
+
+The output-token safeguards are **local-only**: Ollama text calls are limited by
+`_LOCAL_MAX_OUTPUT_TOKENS` in `src/llm_router.py`. The Overall Solution Review
+Judge has a local-only override, `local_max_output_tokens`, in
+`config/agents.yaml` (currently 2,048 tokens) to give its synthesized response
+more room. Qwen Smart Panel triage has its own `_QWEN_TRIAGE_MAX_OUTPUT_TOKENS`
+in `src/solution_architect_triage.py`, and Ollama diagram analysis uses
+`_LOCAL_VISION_MAX_OUTPUT_TOKENS` in `src/proposal_processor.py`. These caps are
+intended to limit local inference work. AWS Bedrock requests do not receive these
+application token caps; the provider's own limits apply. Request timeouts and
+upload/diagram limits still apply to both backends.
+
+To use a higher-capability local model, install it in Ollama yourself, then
+update or add its `ollama/<model>:<tag>` entry in `_BACKEND_MAP` in
+`src/llm_router.py`. Adjust `_LOCAL_MAX_OUTPUT_TOKENS` for its normal agent
+responses. If using Qwen for Smart Panel, adjust
+`_QWEN_TRIAGE_MAX_OUTPUT_TOKENS` separately; if the replacement model has
+different reasoning controls, update `_prepare_triage_llm` in
+`src/solution_architect_triage.py` to match. For diagram analysis, set
+`CLEANONE_OLLAMA_VISION_MODEL` to an installed vision-capable Ollama model and,
+if needed, adjust `_LOCAL_VISION_MAX_OUTPUT_TOKENS`. The application does not
+install models automatically.
 
 Application logs are written to `logs/cleanone.log` with request IDs and timing
 information. `CLEANONE_LOG_LEVEL` and `CLEANONE_LOG_FILE` can be used to configure
 the log level and output path.
+
+The built-in local Qwen configuration disables its internal reasoning mode so
+the local output-token budget is available for review content. If changing the
+Qwen model, keep or revise the `reasoning_effort` setting in `_BACKEND_MAP` to
+match that model's supported reasoning controls.
 
 ## Privacy, security, and operational notes
 
@@ -216,8 +271,9 @@ that private domain knowledge will not leave your environment.**
   private inference.
 - **Local data and logs:** Knowledge and proposal indexes are persisted under
   `config/chroma_db/` and `config/session_proposal_db/`; application logs are
-  written under `logs/`. Restrict access to these locations, define retention and
-  cleanup policies, and use appropriate disk encryption and backups.
+  written under `logs/`. These generated proposal files are excluded from Git.
+  Restrict access to these locations, define retention and cleanup policies, and
+  use appropriate disk encryption and backups.
 - **Network exposure:** The UI binds to loopback by default and does not
   configure authentication. Do not expose it directly to a network as-is. A
   cloud or shared deployment needs an intentional bind/proxy configuration,

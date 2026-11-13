@@ -1,5 +1,6 @@
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -96,6 +97,53 @@ def test_architecture_specialists_treat_as_is_examples_as_context_only():
     assert "Treat code and solution examples labelled" in tasks["review_task"]["description"]
 
 
+def test_cloud_agents_apply_well_architected_guidance_proportionately():
+    agents = AgentFactory._load_yaml(AgentFactory._AGENTS_CONFIG_PATH)
+    cloud_frameworks = {
+        "aws_specialist": "AWS Well-Architected Framework",
+        "azure_specialist": "Azure Well-Architected Framework",
+        "gcp_specialist": "Google Cloud Well-Architected Framework",
+    }
+    cloud_guidance_files = (
+        "knowledge_base/07_cloud_aws.md",
+        "knowledge_base/08_cloud_azure.md",
+        "knowledge_base/09_cloud_gcp.md",
+    )
+
+    for agent_key, framework_name in cloud_frameworks.items():
+        backstory = agents[agent_key]["backstory"]
+        assert framework_name in backstory
+        assert "pragmatically" in backstory or "decision support" in backstory
+        assert "data sensitivity" in backstory
+        assert "Blocking, Recommended, or Optional" in backstory
+        assert "personal project" in backstory
+
+    for guidance_file in cloud_guidance_files:
+        guidance = Path(guidance_file).read_text(encoding="utf-8")
+        assert guidance.strip()
+        assert "not a" in guidance.lower()
+        assert "data sensitivity" in guidance.lower()
+
+
+def test_specialist_recommendations_require_document_locations_and_priorities():
+    tasks = AgentFactory._load_yaml(AgentFactory._TASKS_CONFIG_PATH)
+    review_task = tasks["review_task"]
+    description = review_task["description"]
+
+    assert "priority (Blocking, Recommended, or Optional)" in description
+    assert "exact retrieved heading, page, figure" in description
+    assert "For an image-only design" in description
+    assert "test plan for the solution" in description
+    assert "This assessment is advisory" in description
+    assert "**Design location:**" in review_task["expected_output"]
+    assert "Code location:" in review_task["expected_output"]
+    reconciliation = tasks["technical_reconciliation_task"]["description"]
+    assert "Preserve the design-document location" in reconciliation
+    document_review = tasks["solution_document_review_task"]
+    assert "priority (Blocking, Recommended, or Optional)" in document_review["description"]
+    assert "**Priority:**" in document_review["expected_output"]
+
+
 def test_core_specialists_have_knowledge_sources_for_triage():
     agents = AgentFactory._load_yaml(AgentFactory._AGENTS_CONFIG_PATH)
     expected_patterns = {
@@ -124,17 +172,34 @@ def test_document_review_agent_uses_general_knowledge_source():
     )
 
     with (
+        patch(
+            "src.agent_factory.RAGEngine.query_knowledge_base",
+            return_value="[Source: 00_general.md]\nReview principles.",
+        ) as knowledge_search,
+        patch.object(
+            ProposalProcessor,
+            "query_proposal",
+            return_value="[Proposal Section: Overview]\nArchitecture content.",
+        ) as proposal_search,
         patch("src.agent_factory.ScopedKnowledgeTool") as knowledge_tool,
         patch("src.agent_factory.ProposalSearchTool") as proposal_tool,
         patch("src.agent_factory.Agent"),
-        patch("src.agent_factory.Task"),
+        patch("src.agent_factory.Task") as task_factory,
         patch("src.agent_factory.Crew") as crew_factory,
     ):
         crew_factory.return_value.kickoff.return_value = "Synthesis"
         assert runner.execute_sync("Original specialist feedback") == "Synthesis"
 
+    knowledge_search.assert_called_once_with(
+        "Original specialist feedback",
+        source_filter="00_general.md",
+    )
+    proposal_search.assert_called_once()
     knowledge_tool.assert_called_once_with(source_filter="00_general.md")
     assert proposal_tool.called
+    assert "Review principles." in task_factory.call_args.kwargs["description"]
+    assert "Architecture content." in task_factory.call_args.kwargs["description"]
+    assert runner.proposal_evidence_retrieved
 
 
 def test_agent_execution_uses_iteration_and_time_limits():
@@ -148,6 +213,10 @@ def test_agent_execution_uses_iteration_and_time_limits():
     )
 
     with (
+        patch(
+            "src.agent_factory.RAGEngine.query_knowledge_base",
+            return_value="AWS guidance.",
+        ),
         patch("src.agent_factory.Agent") as agent_factory,
         patch("src.agent_factory.Task"),
         patch("src.agent_factory.Crew") as crew_factory,
@@ -159,6 +228,137 @@ def test_agent_execution_uses_iteration_and_time_limits():
     assert agent_factory.call_args.kwargs["max_execution_time"] == 180
     assert agent_factory.call_args.kwargs["verbose"] is False
     assert crew_factory.call_args.kwargs["verbose"] is False
+
+
+def test_agent_retries_unexecuted_tool_json_without_tools():
+    agents = AgentFactory._load_yaml(AgentFactory._AGENTS_CONFIG_PATH)
+    tasks = AgentFactory._load_yaml(AgentFactory._TASKS_CONFIG_PATH)
+    config = agents["aws_specialist"]
+    runner = AgentRunner(
+        agent_config=config,
+        task_config=tasks[config["task_key"]],
+        llm_instance=object(),
+    )
+    with (
+        patch(
+            "src.agent_factory.RAGEngine.query_knowledge_base",
+            return_value="AWS guidance.",
+        ),
+        patch("src.agent_factory.Agent") as agent_factory,
+        patch("src.agent_factory.Task"),
+        patch("src.agent_factory.Crew") as crew_factory,
+    ):
+        crew_factory.return_value.kickoff.side_effect = [
+            '{"query": "aws rules"}',
+            "A formatted review.",
+        ]
+        result = runner.execute_sync("Review the proposal.")
+
+    assert result == "A formatted review."
+    assert crew_factory.call_count == 2
+    assert agent_factory.call_args.kwargs["tools"] == []
+
+
+def test_local_qwen_retries_no_content_once_with_bounded_tool_free_call():
+    agents = AgentFactory._load_yaml(AgentFactory._AGENTS_CONFIG_PATH)
+    tasks = AgentFactory._load_yaml(AgentFactory._TASKS_CONFIG_PATH)
+    config = agents["aws_specialist"]
+    retry_llm = object()
+    llm = SimpleNamespace(
+        provider="ollama",
+        model="qwen3.5:9b",
+        model_copy=lambda *, update: retry_llm,
+    )
+    runner = AgentRunner(
+        agent_config=config,
+        task_config=tasks[config["task_key"]],
+        llm_instance=llm,
+    )
+
+    with (
+        patch(
+            "src.agent_factory.RAGEngine.query_knowledge_base",
+            return_value="AWS guidance.",
+        ),
+        patch("src.agent_factory.Agent") as agent_factory,
+        patch("src.agent_factory.Task"),
+        patch("src.agent_factory.Crew") as crew_factory,
+    ):
+        crew_factory.return_value.kickoff.side_effect = [
+            RuntimeError("The provider returned no content for model 'qwen3.5:9b'."),
+            "Recovered review.",
+        ]
+        result = runner.execute_sync("Review the proposal.")
+
+    assert result == "Recovered review."
+    assert crew_factory.call_count == 2
+    assert agent_factory.call_args.kwargs["llm"] is retry_llm
+    assert agent_factory.call_args.kwargs["tools"] == []
+    assert agent_factory.call_args.kwargs["max_iter"] == 1
+    assert agent_factory.call_args.kwargs["max_execution_time"] == 60
+
+
+def test_non_local_qwen_no_content_error_is_not_retried():
+    agents = AgentFactory._load_yaml(AgentFactory._AGENTS_CONFIG_PATH)
+    tasks = AgentFactory._load_yaml(AgentFactory._TASKS_CONFIG_PATH)
+    config = agents["aws_specialist"]
+    runner = AgentRunner(
+        agent_config=config,
+        task_config=tasks[config["task_key"]],
+        llm_instance=SimpleNamespace(provider="bedrock", model="qwen3.5:9b"),
+    )
+
+    with (
+        patch(
+            "src.agent_factory.RAGEngine.query_knowledge_base",
+            return_value="AWS guidance.",
+        ),
+        patch("src.agent_factory.Agent"),
+        patch("src.agent_factory.Task"),
+        patch("src.agent_factory.Crew") as crew_factory,
+    ):
+        crew_factory.return_value.kickoff.side_effect = RuntimeError(
+            "The provider returned no content for model 'qwen3.5:9b'."
+        )
+        with pytest.raises(RuntimeError, match="provider returned no content"):
+            runner.execute_sync("Review the proposal.")
+
+    crew_factory.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("provider", "should_override"),
+    [("ollama", True), ("bedrock", False)],
+)
+def test_final_review_token_override_is_local_only(provider, should_override):
+    agents = AgentFactory._load_yaml(AgentFactory._AGENTS_CONFIG_PATH)
+    tasks = AgentFactory._load_yaml(AgentFactory._TASKS_CONFIG_PATH)
+    config = agents["final_review_agent"]
+    llm_with_override = object()
+    llm = SimpleNamespace(
+        provider=provider,
+        model_copy=Mock(return_value=llm_with_override),
+    )
+    runner = AgentRunner(
+        agent_config=config,
+        task_config=tasks[config["task_key"]],
+        llm_instance=llm,
+    )
+
+    with (
+        patch("src.agent_factory.Agent") as agent_factory,
+        patch("src.agent_factory.Task"),
+        patch("src.agent_factory.Crew") as crew_factory,
+    ):
+        crew_factory.return_value.kickoff.return_value = "Overall review."
+        runner.execute_sync("Summarize the completed reviews.")
+
+    if should_override:
+        llm.model_copy.assert_called_once_with(update={"max_tokens": 2048})
+        assert agent_factory.call_args.kwargs["llm"] is llm_with_override
+    else:
+        llm.model_copy.assert_not_called()
+        assert agent_factory.call_args.kwargs["llm"] is llm
 
 
 def test_agent_runner_removes_code_section_when_rating_is_good():
@@ -178,6 +378,10 @@ def test_agent_runner_removes_code_section_when_rating_is_good():
     )
 
     with (
+        patch(
+            "src.agent_factory.RAGEngine.query_knowledge_base",
+            return_value="DDD guidance.",
+        ),
         patch("src.agent_factory.Agent"),
         patch("src.agent_factory.Task"),
         patch("src.agent_factory.Crew") as crew_factory,
@@ -234,42 +438,68 @@ def test_document_review_task_reports_evidence_for_all_general_attributes():
     assert all(name in expected_output for name in attribute_names)
 
 
-def test_final_review_task_uses_evidence_based_pass_and_documentation_rating():
+def test_final_review_task_lists_blocking_changes_for_pass():
     tasks = AgentFactory._load_yaml(AgentFactory._TASKS_CONFIG_PATH)
     review_task = tasks["final_review_task"]
+    expected_output = review_task["expected_output"]
 
     assert "likely to work" in review_task["description"]
     assert "meet the functional requirements stated" in review_task["description"]
     assert "architectural anti-pattern" in review_task["description"]
     assert "ordinary improvement recommendation alone" in review_task["description"]
-    assert "exactly these four sections" in review_task["expected_output"]
-    assert "#### Implementation Decision" in review_task["expected_output"]
-    assert "**[Pass | Needs Revision]**" in review_task["expected_output"]
-    assert "#### Technical Solution Summary" in review_task["expected_output"]
-    assert "principles assessed" in review_task["expected_output"]
-    assert "#### Solution Documentation Assessment" in review_task["expected_output"]
-    assert "**Documentation Presentation Rating: [Good | Fair | Bad | Unable to assess]**" in review_task["expected_output"]
-    assert "#### Business Understanding" in review_task["expected_output"]
-    assert "Not clear from the reviews." in review_task["expected_output"]
+    assert "exactly these seven sections" in expected_output
+    assert "**Implementation Decision:** Pass / Fail" in expected_output
+    assert "**Changes Required for Pass**" in expected_output
+    assert "source specialist" in review_task["description"]
+    assert "exact design-document area to update" in review_task["description"]
+    assert "Do not list recommended or optional improvements as approval blockers." in review_task["description"]
+    assert "**Solution Summary**" in expected_output
+    assert "**Solution Document Rating:** Good / Fair / Bad" in expected_output
+    assert "**Documentation Summary**" in expected_output
+    assert "**Testing Plan Coverage:** Good / Fair / Bad" in expected_output
+    assert "**Testing Summary**" in expected_output
+    section_labels = [
+        "**Implementation Decision:**",
+        "**Changes Required for Pass**",
+        "**Solution Summary**",
+        "**Solution Document Rating:**",
+        "**Documentation Summary**",
+        "**Testing Plan Coverage:**",
+        "**Testing Summary**",
+    ]
+    assert [expected_output.index(label) for label in section_labels] == sorted(
+        expected_output.index(label) for label in section_labels
+    )
+    assert "Needs Revision" not in expected_output
+    assert "Unable to assess" not in expected_output
+    assert "covers most important areas" in review_task["description"]
+    assert "adequately explains the project concept" in review_task["description"]
+    assert "vital information is missing" in review_task["description"]
+    assert "must not affect the implementation decision" in review_task["description"]
 
 
-def test_smart_panel_selects_mandatory_and_keyword_matched_specialists():
+def test_smart_panel_selects_triaged_domains_and_always_runs_testing():
     runner = AgentFactory.create_agent(
         profile_id=AgentFactory.ALL_AGENTS_LABEL,
         llm=object()
+    )
+    additional = runner._select_additional_specialists(
+        "Review AWS services and bounded contexts."
     )
 
     selected = [
         profile_key
         for profile_key, _ in runner._select_specialists(
-            "Review AWS services and bounded contexts."
+            "Review AWS services and bounded contexts.",
+            triage_selected=("ddd_specialist", "cqrs_specialist"),
+            additional_selected=additional,
         )
     ]
 
     assert selected == [
         "ddd_specialist",
-        "clean_arch_specialist",
         "cqrs_specialist",
+        "testing_specialist",
         "aws_specialist",
     ]
 
@@ -292,9 +522,11 @@ def test_smart_panel_runs_triage_selected_specialists_and_streams_progress():
         llm=object()
     )
     triage = _triage_decision(("clean_arch_specialist", "cqrs_specialist"))
+    additional = runner._select_additional_specialists("Review the solution.")
     selected_specialists = runner._select_specialists(
         "Review the solution.",
         triage_selected=triage.selected_agent_keys,
+        additional_selected=additional,
     )
 
     def fake_execute(agent, _):
@@ -334,6 +566,7 @@ def test_smart_panel_runs_triage_selected_specialists_and_streams_progress():
     assert "Specialists Selected" in report
     assert "Clean Architecture Reviewer" in report
     assert "CQRS & Data Flow Architect" in report
+    assert "Testing & Verification Strategist" in report
     assert "Domain-Driven Design Specialist" in report
     assert "## Overall Solution Review" in report
     assert "## Specialist Feedback" in report
@@ -367,15 +600,31 @@ def test_smart_panel_synthesizes_document_review_into_final_output():
         if agent_key == "solution_document_review_agent":
             assert "Revised advice." in request
             return "Document peer review recommendations."
+        if agent_key == "testing_specialist":
+            return (
+                "**Testing Plan Coverage**\n"
+                "**Coverage:** Fair\n"
+                "**Key Areas to Test**\n"
+                "* Verify event retries are idempotent and failures reach a dead-letter queue."
+            )
         if agent_key == "final_review_agent":
             assert "Revised advice." in request
             assert "Document peer review recommendations." in request
+            assert "TESTING & VERIFICATION REVIEW (ADVISORY" in request
+            assert "dead-letter queue" in request
             return (
-                "#### Solution Documentation Assessment\n\n"
-                "**General assessment:** The review found the proposal clear "
-                "enough to understand, with several gaps.\n\n"
-                "**Documentation Presentation Rating: Fair**\n"
-                "Important decisions need more explanation."
+                "**Implementation Decision:** Pass\n\n"
+                "**Changes Required for Pass**\n"
+                "None — no blocking changes are required.\n\n"
+                "**Solution Summary**\n"
+                "The booking design appears workable.\n\n"
+                "**Solution Document Rating:** Fair\n\n"
+                "**Documentation Summary**\n"
+                "The proposal is understandable but omits important decisions.\n"
+                "- Clarify service ownership and persistence.\n\n"
+                "**Testing Plan Coverage:** Fair\n\n"
+                "**Testing Summary**\n"
+                "Test retries, idempotency, and dead-letter handling."
             )
         return f"Original advice from {agent.agent_config['role']}."
 
@@ -395,9 +644,15 @@ def test_smart_panel_synthesizes_document_review_into_final_output():
     assert "Revised advice." in report
     assert "**Reconciliation note:** Combined conflicting proposals." in report
     assert "Document peer review recommendations." not in report
-    assert "#### Solution Documentation Assessment" in report
-    assert "**Documentation Presentation Rating: Fair**" in report
-    assert "Important decisions need more explanation." in report
+    assert "**Solution Document Rating:** Fair" in report
+    assert "**Documentation Summary**" in report
+    assert "- Clarify service ownership and persistence." in report
+    assert "**Solution Summary**" in report
+    assert "**Changes Required for Pass**" in report
+    assert "None — no blocking changes are required." in report
+    assert "**Testing Plan Coverage:** Fair" in report
+    assert "**Testing Summary**" in report
+    assert "Test retries, idempotency, and dead-letter handling." in report
     assert "Document peer review recommendations." not in report
     assert "## Technical Feedback Reconciliation" not in report
     appendix = report.split("## Appendix: Original Feedback Changed by Reconciliation", 1)[1]
@@ -445,11 +700,16 @@ def test_smart_panel_includes_only_clouds_mentioned_in_request():
         profile_id=AgentFactory.ALL_AGENTS_LABEL,
         llm=object()
     )
+    additional = runner._select_additional_specialists(
+        "The solution deploys to AWS S3 and Azure Cosmos DB."
+    )
 
     selected = [
         profile_key
         for profile_key, _ in runner._select_specialists(
-            "The solution deploys to AWS S3 and Azure Cosmos DB."
+            "The solution deploys to AWS S3 and Azure Cosmos DB.",
+            triage_selected=("clean_arch_specialist",),
+            additional_selected=additional,
         )
     ]
 
@@ -560,6 +820,10 @@ def test_agent_task_uses_shared_concise_response_format():
     )
 
     with (
+        patch(
+            "src.agent_factory.RAGEngine.query_knowledge_base",
+            return_value="AWS guidance.",
+        ),
         patch("src.agent_factory.Agent"),
         patch("src.agent_factory.Task") as task_factory,
         patch("src.agent_factory.Crew"),
@@ -572,9 +836,9 @@ def test_agent_task_uses_shared_concise_response_format():
     assert "ONLY IF your rating is **Fair** or **Bad**" in task_arguments["description"]
     assert "#### Overall Rating: [Good | Fair | Bad | Not Applicable]" in task_arguments["expected_output"]
     assert "without conversational filler" in task_arguments["expected_output"]
-    assert "Before every code or configuration snippet, state its target" in task_arguments["description"]
+    assert "Before every code or configuration snippet, also state its code target" in task_arguments["description"]
     assert "Create new file: <generic-filename>" in task_arguments["description"]
-    assert "**Location:**" in task_arguments["expected_output"]
+    assert "**Design location:**" in task_arguments["expected_output"]
 
 
 def test_proposal_search_tool_tracks_retrieved_evidence():

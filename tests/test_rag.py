@@ -1,31 +1,35 @@
-# tests/test_rag.py
-import sys
-import os
-
-# Append project root to path so we can import 'src' smoothly
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from unittest.mock import patch
 
 from src.rag_engine import RAGEngine
 
-def run_rag_test():
-    print("=== Testing RAG Engine Layer ===")
-    
-    # Ensure initialization code triggers safely
-    RAGEngine.initialize_knowledge_base()
-    
-    # Define a highly specific architectural concept to query
-    test_query = "Bounded Context mapping rules in Domain Driven Design"
-    print(f"\nSearching database for: '{test_query}'...")
-    
-    results = RAGEngine.query_knowledge_base(test_query, n_results=2)
-    
-    print("\n[Database Return Context]:")
-    print(results)
-    
-    if "Error" in results or "No specific references" in results:
-        print("\n❌ RAG retrieval test failed.")
-    else:
-        print("\n✅ RAG retrieval test completed successfully!")
 
-if __name__ == "__main__":
-    run_rag_test()
+def test_query_returns_formatted_knowledge_sources():
+    with patch("src.rag_engine.chromadb.PersistentClient") as client_factory:
+        collection = client_factory.return_value.get_collection.return_value
+        collection.query.return_value = {
+            "documents": [["A bounded context owns its model."]],
+            "metadatas": [[{"source": "01_ddd.md"}]],
+        }
+
+        result = RAGEngine.query_knowledge_base(
+            "bounded contexts",
+            n_results=1,
+            source_filter="01_ddd.md",
+        )
+
+    assert result == "[Source: 01_ddd.md]\nA bounded context owns its model."
+    collection.query.assert_called_once_with(
+        query_texts=["bounded contexts"],
+        n_results=1,
+        where={"source": "01_ddd.md"},
+    )
+
+
+def test_query_reports_empty_knowledge_results():
+    with patch("src.rag_engine.chromadb.PersistentClient") as client_factory:
+        collection = client_factory.return_value.get_collection.return_value
+        collection.query.return_value = {"documents": [[]], "metadatas": [[]]}
+
+        result = RAGEngine.query_knowledge_base("missing guidance")
+
+    assert result == "No matching guidelines found in knowledge base."

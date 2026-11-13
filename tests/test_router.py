@@ -1,34 +1,53 @@
 # tests/test_router.py
-import sys
-import os
+from unittest.mock import patch
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import pytest
 
 from src.llm_router import LLMRouter
 
-def test_ollama_route():
-    print("=== Testing Infrastructure Router ===")
     
-    try:
-        backends = LLMRouter.get_supported_backends()
-        print(f"Supported Backends identified: {backends}")
-        
-        # Pull the primary local handle
-        target_choice = backends[0] 
-        print(f"Attempting instantiation for: {target_choice}...")
-        
-        llm_instance = LLMRouter.create_backend(target_choice)
-        
-        # Execute a direct lightweight completion to test network socket
-        print("Pinging model endpoint...")
-        response = llm_instance.call([{"role": "user", "content": "Respond with the word 'Online'"}])
-        
-        print(f"Model Response: {response}")
-        print("✅ Router connection verified.")
-        
-    except Exception as e:
-        print(f"❌ Router Connection Failed. Details: {e}")
-        print("\n💡 Tip: Make sure 'ollama pull llama3.2' and the Ollama app are running background sessions.")
+def test_local_backend_is_configured_without_calling_the_model():
+    choice = "Local Machine (Ollama - Llama3.2:3b)"
 
-if __name__ == "__main__":
-    test_ollama_route()
+    with patch("src.llm_router.LLM") as llm_factory:
+        LLMRouter.create_backend(choice)
+
+    assert llm_factory.call_args.kwargs == {
+        "model": "ollama/llama3.2:3b",
+        "base_url": "http://localhost:11434",
+        "timeout": 90,
+        "max_tokens": 1024,
+    }
+
+
+def test_qwen_backend_is_configured_without_calling_the_model():
+    choice = "Local Machine (Ollama - Qwen3.5:9b)"
+
+    with patch("src.llm_router.LLM") as llm_factory:
+        LLMRouter.create_backend(choice)
+
+    assert llm_factory.call_args.kwargs == {
+        "model": "ollama/qwen3.5:9b",
+        "base_url": "http://localhost:11434",
+        "timeout": 90,
+        "max_tokens": 1024,
+        "reasoning_effort": "none",
+    }
+
+
+def test_bedrock_backend_uses_sdk_credential_chain_without_static_key_gate():
+    choice = "Enterprise Cloud (AWS Bedrock - Claude 3.5 Sonnet) - NOT IMPLEMENTED"
+
+    with patch("src.llm_router.LLM") as llm_factory:
+        LLMRouter.create_backend(choice)
+
+    assert llm_factory.call_args.kwargs == {
+        "model": "bedrock/anthropic.claude-3-5-sonnet-v1:0",
+        "base_url": None,
+        "timeout": 90,
+    }
+
+
+def test_unsupported_backend_is_rejected():
+    with pytest.raises(ValueError, match="Unsupported infrastructure selection"):
+        LLMRouter.create_backend("unlisted backend")

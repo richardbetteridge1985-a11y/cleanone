@@ -10,6 +10,7 @@ env/
 
 # App-specific persistent data structures
 config/chroma_db/
+config/session_proposal_db/
 config/kb_hash.txt 
 logs/
 

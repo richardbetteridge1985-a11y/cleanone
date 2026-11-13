@@ -24,6 +24,24 @@ def build_and_launch_ui():
         is_single = (review_mode == "Single Specialist Review")
         return gr.update(visible=is_single, interactive=is_single)
 
+    def update_review_controls(interactive, review_mode):
+        is_single = review_mode == "Single Specialist Review"
+        return (
+            gr.update(interactive=interactive),
+            gr.update(interactive=interactive),
+            gr.update(interactive=interactive),
+            gr.update(visible=is_single, interactive=interactive and is_single),
+            gr.update(interactive=interactive),
+            gr.update(
+                value=(
+                    "Analyse Proposal & Run Agents"
+                    if interactive
+                    else "Analysis in progress..."
+                ),
+                interactive=interactive,
+            ),
+        )
+
     def process_request(user_input, uploaded_file, review_mode, specialist_choice, infrastructure_choice):
         if not user_input and not uploaded_file:
             logger.warning("Request rejected: no prompt or proposal was provided")
@@ -65,6 +83,11 @@ def build_and_launch_ui():
                 file_path=uploaded_file,
                 backend_choice=infrastructure_choice
             )
+            proposal_status = "\n".join(proposal_summary.splitlines()[:2])
+            yield (
+                "*✅ Proposal processing complete*\n\n"
+                f"{proposal_status}"
+            )
             logger.info(
                 "Proposal ingestion returned file_type=%s duration_seconds=%.2f",
                 file_type,
@@ -73,7 +96,7 @@ def build_and_launch_ui():
             effective_prompt = (
                 f"{effective_prompt}\n\n"
                 f"--- UPLOADED PROPOSAL METADATA ---\n{proposal_summary}\n"
-                "Use the 'Search Uploaded Solution Proposal' tool to inspect specific sections and diagrams."
+                "Use the retrieved proposal evidence as the primary source for this review."
             )
 
         llm_instance = LLMRouter.create_backend(infrastructure_choice)
@@ -98,8 +121,10 @@ def build_and_launch_ui():
                 uploaded_file is not None,
             )
         status = "running"
+        latest_output = "*⏳ Starting solution analysis...*"
+        yield (latest_output, *update_review_controls(False, review_mode))
         try:
-            yield from iter_with_request_context(
+            for output in iter_with_request_context(
                 process_request(
                     user_input,
                     uploaded_file,
@@ -108,7 +133,9 @@ def build_and_launch_ui():
                     infrastructure_choice,
                 ),
                 request_id,
-            )
+            ):
+                latest_output = output
+                yield (output, *update_review_controls(False, review_mode))
             status = "completed"
         except Exception as error:
             status = "failed"
@@ -117,7 +144,8 @@ def build_and_launch_ui():
                     "Review request failed error_type=%s",
                     type(error).__name__,
                 )
-            yield f"⚠️ Presentation Layer Error: {str(error)}"
+            latest_output = f"⚠️ Presentation Layer Error: {str(error)}"
+            yield (latest_output, *update_review_controls(False, review_mode))
         finally:
             with request_context(request_id):
                 logger.info(
@@ -125,6 +153,7 @@ def build_and_launch_ui():
                     status,
                     time.perf_counter() - request_started,
                 )
+        yield (latest_output, *update_review_controls(True, review_mode))
 
     with gr.Blocks(theme="soft", title="Architect Agent Gateway") as app:
         gr.Markdown("# 🤖 Multi-Modal Architectural Review Gateway")
@@ -132,7 +161,7 @@ def build_and_launch_ui():
             "Upload a solution proposal (`.docx`, `.pdf`, `.md`, `.png`, `.jpg`, or `.jpeg`) "
             "and run a full multi-agent review or target a single architectural lens. "
             "The Smart Panel classifies the solution, selects relevant specialists, "
-            "and runs no more than four."
+            "and runs no more than four. Uploads are limited to 25 MB and five diagrams."
         )
 
         with gr.Row():
@@ -167,7 +196,7 @@ def build_and_launch_ui():
         with gr.Row():
             with gr.Column(scale=4):
                 file_input = gr.File(
-                    label="4. Upload Solution Proposal (Optional)",
+                    label="4. Upload Solution Proposal (Optional; max 25 MB and five diagrams)",
                     file_types=[".docx", ".pdf", ".md", ".png", ".jpg", ".jpeg"],
                     type="filepath"
                 )
@@ -186,7 +215,15 @@ def build_and_launch_ui():
         submit_btn.click(
             fn=ui_event_handler,
             inputs=[prompt_input, file_input, mode_radio, specialist_dropdown, backend_dropdown],
-            outputs=output_display
+            outputs=[
+                output_display,
+                prompt_input,
+                file_input,
+                mode_radio,
+                specialist_dropdown,
+                backend_dropdown,
+                submit_btn,
+            ],
         )
 
     app.queue(default_concurrency_limit=1, max_size=1)

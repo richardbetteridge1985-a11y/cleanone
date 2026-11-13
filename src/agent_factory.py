@@ -1,10 +1,11 @@
 # src/agent_factory.py
+import json
 import logging
 import os
 import time
 import yaml
 from crewai import Agent, Task, Crew
-from src.rag_engine import ScopedKnowledgeTool
+from src.rag_engine import RAGEngine, ScopedKnowledgeTool
 from src.output_cleanup import clean_conditional_code_section
 from src.proposal_processor import ProposalProcessor, ProposalSearchTool
 from src.solution_architect_triage import SolutionArchitectTriageAgent, TriageDecision
@@ -34,19 +35,7 @@ class AgentFactory:
     @classmethod
     def get_individual_profiles(cls) -> list[str]:
         """Returns only the individual specialist profiles from agents.yaml."""
-        try:
-            configs = cls._load_yaml(cls._AGENTS_CONFIG_PATH)
-            return [
-                key.replace("_", " ").title()
-                for key, config in configs.items()
-                if not config.get("internal_only")
-            ]
-        except Exception as error:
-            logger.error(
-                "Unable to load individual agent profiles error_type=%s",
-                type(error).__name__,
-            )
-            return []
+        return cls.get_available_profiles()
         
     @classmethod
     def _load_yaml(cls, file_path: str) -> dict:
@@ -59,20 +48,12 @@ class AgentFactory:
     @classmethod
     def get_available_profiles(cls) -> list[str]:
         """Scans the agents.yaml keys to dynamically populate the UI dropdown."""
-        try:
-            configs = cls._load_yaml(cls._AGENTS_CONFIG_PATH)
-            # Map raw snake_case keys into human-readable Title Case labels for the UI
-            return [
-                key.replace("_", " ").title()
-                for key, config in configs.items()
-                if not config.get("internal_only")
-            ]
-        except Exception as error:
-            logger.error(
-                "Unable to load available agent profiles error_type=%s",
-                type(error).__name__,
-            )
-            return []
+        configs = cls._load_yaml(cls._AGENTS_CONFIG_PATH)
+        return [
+            key.replace("_", " ").title()
+            for key, config in configs.items()
+            if not config.get("internal_only")
+        ]
 
     @classmethod
     def create_agent(
@@ -213,10 +194,28 @@ class SmartPanelRunner:
             routing_text = user_request
 
         additional_candidates = self._select_additional_specialists(routing_text)
-        omitted_additional = []
-        if len(additional_candidates) >= self.MAX_SPECIALISTS:
-            omitted_additional = additional_candidates[self.MAX_SPECIALISTS - 1:]
-            additional_candidates = additional_candidates[:self.MAX_SPECIALISTS - 1]
+        always_included = [
+            candidate for candidate in additional_candidates
+            if candidate[1].get("always_include")
+        ]
+        optional_candidates = [
+            candidate for candidate in additional_candidates
+            if not candidate[1].get("always_include")
+        ]
+        available_additional_slots = self.MAX_SPECIALISTS - 1
+        if len(always_included) > available_additional_slots:
+            raise ValueError(
+                "Always-included specialists exceed the Smart Panel safety limit "
+                "while reserving a slot for solution-specific triage."
+            )
+        selected_optional_count = max(
+            0,
+            available_additional_slots - len(always_included),
+        )
+        omitted_additional = optional_candidates[selected_optional_count:]
+        additional_candidates = (
+            always_included + optional_candidates[:selected_optional_count]
+        )
         available_core_slots = self.MAX_SPECIALISTS - len(additional_candidates)
         triage = SolutionArchitectTriageAgent(
             agents_metadata=self.agents_metadata,
@@ -260,8 +259,9 @@ class SmartPanelRunner:
         )
         results = []
         completed_agents = []
+        testing_review = ""
         total_stages = len(selected_specialists) + 3
-        for index, (_, agent_config) in enumerate(selected_specialists, start=1):
+        for index, (profile_key, agent_config) in enumerate(selected_specialists, start=1):
             yield (
                 f"{triage_report}\n\n---\n\n"
                 f"⏳ Smart Panel: running specialist {index}/"
@@ -282,6 +282,8 @@ class SmartPanelRunner:
             logger.info("Smart Panel specialist started role=%s", agent_config["role"])
             result = "\n".join(runner.run(user_request))
             results.append(f"### {agent_config['role']}\n\n{result}")
+            if profile_key == "testing_specialist":
+                testing_review = result
             completed_agents.append(agent_config["role"])
             logger.info(
                 "Smart Panel specialist completed role=%s duration_seconds=%.2f "
@@ -352,7 +354,10 @@ class SmartPanelRunner:
                 "--- TECHNICAL RECONCILIATION ---\n"
                 f"{technical_review}\n\n"
                 "--- SOLUTION DOCUMENT PEER REVIEW ---\n"
-                f"{document_review}"
+                f"{document_review}\n\n"
+                "--- TESTING & VERIFICATION REVIEW "
+                "(ADVISORY; MUST NOT CHANGE IMPLEMENTATION DECISION) ---\n"
+                f"{testing_review or 'Testing specialist feedback was unavailable.'}"
             )
         )
 
@@ -472,6 +477,52 @@ class AgentRunner:
     def execute_sync(self, user_request: str) -> str:
         started = time.perf_counter()
         target_doc = self.agent_config.get("knowledge_source")
+        retrieved_context = []
+        if target_doc:
+            knowledge_context = RAGEngine.query_knowledge_base(
+                user_request,
+                source_filter=target_doc,
+            )
+            if knowledge_context.startswith("Error executing context retrieval logic:"):
+                raise RuntimeError(
+                    f"Could not retrieve specialist guidance from {target_doc}."
+                )
+            retrieved_context.append(
+                f"--- SPECIALIST KNOWLEDGE ({target_doc}) ---\n{knowledge_context}"
+            )
+            logger.info(
+                "Agent knowledge context retrieved role=%s source=%s output_chars=%d",
+                self.agent_config["role"],
+                target_doc,
+                len(knowledge_context),
+            )
+
+        if self.proposal_uploaded:
+            proposal_context = ProposalProcessor.query_proposal(
+                f"{self.agent_config['role']}: {user_request}"
+            )
+            if proposal_context.startswith("Error querying uploaded proposal:"):
+                raise RuntimeError("Could not retrieve evidence from the uploaded proposal.")
+            self.proposal_evidence_retrieved = proposal_context.startswith(
+                "[Proposal Section:"
+            )
+            retrieved_context.append(
+                f"--- UPLOADED PROPOSAL EVIDENCE ---\n{proposal_context}"
+            )
+            logger.info(
+                "Agent proposal context retrieved role=%s evidence_found=%s output_chars=%d",
+                self.agent_config["role"],
+                self.proposal_evidence_retrieved,
+                len(proposal_context),
+            )
+
+        task_input = user_request
+        if retrieved_context:
+            task_input += (
+                "\n\n--- PRE-RETRIEVED REVIEW EVIDENCE ---\n"
+                + "\n\n".join(retrieved_context)
+            )
+
         tools = []
         if target_doc:
             tools.append(ScopedKnowledgeTool(source_filter=target_doc))
@@ -479,11 +530,21 @@ class AgentRunner:
         if self.proposal_uploaded:
             tools.append(ProposalSearchTool())
 
+        agent_llm = self.llm
+        local_max_output_tokens = self.agent_config.get("local_max_output_tokens")
+        if (
+            local_max_output_tokens is not None
+            and getattr(self.llm, "provider", None) == "ollama"
+        ):
+            agent_llm = self.llm.model_copy(
+                update={"max_tokens": local_max_output_tokens}
+            )
+
         crew_agent = Agent(
             role=self.agent_config["role"],
             goal=self.agent_config["goal"],
             backstory=self.agent_config["backstory"],
-            llm=self.llm,
+            llm=agent_llm,
             verbose=False,
             allow_delegation=False,
             tools=tools,
@@ -492,7 +553,7 @@ class AgentRunner:
         )
         
         crew_task = Task(
-            description=self.task_config["description"].format(user_request=user_request),
+            description=self.task_config["description"].format(user_request=task_input),
             expected_output=self.task_config["expected_output"],
             agent=crew_agent
         )
@@ -509,7 +570,63 @@ class AgentRunner:
             len(tools),
             self.proposal_uploaded,
         )
-        response = clean_conditional_code_section(str(crew.kickoff()))
+        try:
+            raw_response = str(crew.kickoff()).strip()
+        except RuntimeError as error:
+            if not (
+                self._is_local_qwen()
+                and "provider returned no content" in str(error).casefold()
+            ):
+                raise
+            logger.warning(
+                "Local Qwen returned no content role=%s; retrying once with a "
+                "short, tool-free response",
+                self.agent_config["role"],
+            )
+            retry_llm = self.llm.model_copy(
+                update={
+                    "reasoning_effort": "none",
+                    "max_tokens": 768,
+                    "timeout": 60,
+                }
+            )
+            raw_response = self._retry_without_tools(
+                task_description=self.task_config["description"].format(
+                    user_request=task_input
+                ),
+                llm_instance=retry_llm,
+                retry_instruction=(
+                    "The previous attempt returned no review content. Use only "
+                    "the evidence already provided, do not call tools, and give "
+                    "a concise review in the requested format."
+                ),
+                max_execution_time=60,
+            )
+        if self._is_unexecuted_tool_call(raw_response):
+            logger.warning(
+                "Agent returned unexecuted tool-call JSON role=%s; retrying without tools",
+                self.agent_config["role"],
+            )
+            raw_response = self._retry_without_tools(
+                task_description=self.task_config["description"].format(
+                    user_request=task_input
+                ),
+                llm_instance=self.llm,
+                retry_instruction=(
+                    "Your previous response was an unexecuted tool-call payload, "
+                    "not a review. Do not call tools or return JSON. Use the "
+                    "pre-retrieved evidence above and produce the requested review "
+                    "in its specified format."
+                ),
+                max_execution_time=180,
+            )
+            if self._is_unexecuted_tool_call(raw_response):
+                raise RuntimeError(
+                    "The model returned tool-call JSON instead of a review, even after "
+                    "a retry without tools. Try a model with reliable instruction following."
+                )
+
+        response = clean_conditional_code_section(raw_response)
         logger.info(
             "Agent execution completed role=%s duration_seconds=%.2f output_chars=%d",
             self.agent_config["role"],
@@ -517,8 +634,70 @@ class AgentRunner:
             len(response),
         )
         if self.proposal_uploaded:
-            self.proposal_evidence_retrieved = tools[-1].retrieved_evidence
+            self.proposal_evidence_retrieved = (
+                self.proposal_evidence_retrieved or tools[-1].retrieved_evidence
+            )
         return response
+
+    def _retry_without_tools(
+        self,
+        task_description: str,
+        llm_instance,
+        retry_instruction: str,
+        max_execution_time: int,
+    ) -> str:
+        retry_agent = Agent(
+            role=self.agent_config["role"],
+            goal=self.agent_config["goal"],
+            backstory=self.agent_config["backstory"],
+            llm=llm_instance,
+            verbose=False,
+            allow_delegation=False,
+            tools=[],
+            max_iter=1,
+            max_execution_time=max_execution_time,
+        )
+        retry_task = Task(
+            description=f"{task_description}\n\n{retry_instruction}",
+            expected_output=self.task_config["expected_output"],
+            agent=retry_agent,
+        )
+        return str(
+            Crew(
+                agents=[retry_agent],
+                tasks=[retry_task],
+                verbose=False,
+            ).kickoff()
+        ).strip()
+
+    def _is_local_qwen(self) -> bool:
+        return (
+            getattr(self.llm, "provider", None) == "ollama"
+            and "qwen" in str(getattr(self.llm, "model", "")).casefold()
+        )
+
+    @staticmethod
+    def _is_unexecuted_tool_call(response: str) -> bool:
+        candidate = response.strip()
+        if candidate.startswith("```") and candidate.endswith("```"):
+            candidate = "\n".join(candidate.splitlines()[1:-1]).strip()
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(payload, dict):
+            return False
+
+        keys = set(payload)
+        if keys.intersection({"tool_call", "tool_calls"}):
+            return True
+        if keys.intersection({"tool", "tool_name"}) and keys.intersection(
+            {"query", "arguments", "input", "parameters"}
+        ):
+            return True
+        if "action" in keys and keys.intersection({"action_input", "input"}):
+            return True
+        return keys == {"query"} and isinstance(payload["query"], str)
 
     def run(self, user_request: str):
         try:
