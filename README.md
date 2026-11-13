@@ -18,21 +18,26 @@ certify a solution.
 
 The application accepts a written prompt and optionally a solution document. It
 supports Word (`.docx`), PDF (`.pdf`), Markdown (`.md`), and image (`.png`, `.jpg`,
-`.jpeg`) uploads. Embedded diagrams and standalone images are described and added
-to the document search index so their architecture can be considered alongside
-the text.
+`.jpeg`) uploads. Embedded diagrams and standalone images receive AI-generated
+descriptions that are added to the document search index so their architecture
+can be considered alongside the text. These descriptions are not verified OCR;
+vision models can misread or omit labels, so confirm exact image text before
+treating it as a fact.
 
 There are two review modes:
 
 - **Smart Panel** classifies the submission, selects relevant specialists, runs
   their reviews, reconciles technical feedback, assesses the documentation, and
   produces a final implementation decision.
-- **Single Specialist Review** runs one selected specialist for a focused review.
+- **Single Specialist Review** runs only the selected specialist and limits its
+  response to that specialist's domain. Testing coverage is included only when
+  the Testing & Verification Strategist is selected; an overall implementation
+  decision is produced by the Smart Panel.
 
 The Smart Panel rejects material only when it is clearly unrelated to software or
-a digital solution. It runs at most four selected specialists. This cap applies
-to specialist reviews; the internal reconciliation, document-review, and final
-review stages run afterward.
+a digital solution. It runs every specialist selected as relevant to the
+solution; there is no specialist-count cap. The internal reconciliation,
+document-review, and final-review stages run after the specialist reviews.
 
 The final review distinguishes implementation readiness from document quality:
 
@@ -89,12 +94,15 @@ with a reason rather than treated as design defects.
 
 The triage agent selects the five core lenses (DDD, Clean Architecture, CQRS, EDA,
 and NFR) according to solution context. The testing specialist always runs in the
-Smart Panel; cloud specialists use the existing prompt/document keyword-routing
-rules. Cloud framework practices are treated as guidance, not a universal
-checklist: recommendations are scaled to the proposal's sensitivity, regulation,
-business impact, expected workload, operational capacity, and budget. A fintech
-system may warrant stringent controls; a personal or small low-risk service may
-need simpler safeguards. All specialists are instructed to
+Smart Panel. AWS, Azure, and Google Cloud specialists run only when the solution
+prompt or uploaded document clearly indicates use of that cloud, such as a
+deployment statement, a cloud architecture label, or cloud-specific services.
+Comparisons, options, and incidental mentions do not trigger them. Cloud
+framework practices are treated as guidance, not a universal checklist:
+recommendations are scaled to the proposal's sensitivity, regulation, business
+impact, expected workload, operational capacity, and budget. A fintech system may
+warrant stringent controls; a personal or small low-risk service may need simpler
+safeguards. All specialists are instructed to
 treat “As Is”, current-process, and current-state examples as context, not as the
 target design.
 
@@ -202,15 +210,27 @@ Bedrock backend uses the standard AWS SDK credential chain (for example,
 environment credentials, shared profiles/SSO, or an attached role) and requires
 an AWS region from the environment or shared configuration.
 
-Uploads are limited to 25 MB and five diagrams per proposal. A proposal exceeding
-either limit is rejected before vision analysis begins. Each diagram-analysis
-request has a 120-second timeout. The local text backend uses `llama3.2:3b`;
-diagram analysis uses the vision-capable Ollama model `qwen3.5:9b` by default.
-Install that model locally before reviewing diagrams, or set
+Uploads are limited to 25 MB. The image pipeline prioritizes images near
+architecture-related headings, checks at most 20 images, ignores photos,
+decorative images, logos, and unrelated charts, and analyses at most five
+solution-architecture diagrams. Images not checked within those limits are
+reported as skipped. Vision analysis has a three-minute budget per upload, with
+a 60-second timeout per image. The local text backend uses `llama3.2:3b`; diagram analysis
+uses the vision-capable Ollama model `qwen3.5:9b` by default. It classifies
+diagram type, identifies technologies with visible evidence, summarizes the
+diagram's goal, and maps its components and flows. Install that model locally
+before reviewing diagrams, or set
 `CLEANONE_OLLAMA_VISION_MODEL` to another already-installed vision-capable model.
 CleanOne checks that the configured model is installed and will not download it
 automatically. If vision analysis is unavailable, the text review continues and
 the proposal-processing status reports that the diagrams could not be analysed.
+Local Qwen vision calls disable reasoning mode and allow up to 1,024 output
+tokens for the structured analysis. Review agents receive the generated
+description rather than the original image; the description is not verified OCR.
+Exact labels should be confirmed from proposal text or manually checked against
+the image before treating them as facts. All classified architecture diagrams
+are included in specialist proposal searches, even when they are not the closest
+semantic search match.
 
 ### Local model sizing and token safeguards
 

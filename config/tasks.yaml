@@ -9,11 +9,20 @@ review_task:
 
     {user_request}
 
-    Treat code and solution examples labelled "As Is", "As-Is", "current process", or
-    "current state" as descriptive context, not as the desired design. Do not copy or
-    recommend them as target-state solutions. Base recommendations on an explicitly
-    stated future or target state; if none is stated, identify the ambiguity instead
-    of inventing a target.
+    Treat clearly identified existing-state material as context, not as the desired
+    design. Do not copy or recommend it as the target solution. Base recommendations
+    on an explicitly stated future or target design; if none is stated, identify the
+    ambiguity instead of inventing one.
+
+    Evidence-source safeguards:
+    - References to existing-state examples in these instructions are not evidence
+      that such material appears in the proposal.
+    - AI-generated diagram descriptions are fallible interpretations, not verified
+      OCR. Do not claim exact text or labels appear in an image based only on such a
+      description. If a recommendation depends on exact image text, state that it
+      could not be verified and request confirmation.
+    - Separate directly supported facts from interpretations. Do not describe a
+      design as an existing-state design unless the proposal itself explicitly says so.
 
     Keep recommendations specific and proportionate to the system's purpose, users,
     data sensitivity, regulatory obligations, business impact, expected scale,
@@ -119,6 +128,10 @@ technical_reconciliation_task:
 
     {user_request}
 
+    Do not promote unsupported specialist claims to facts. AI-generated diagram
+    descriptions are not verified OCR; if a claim depends on exact image text,
+    retain it only as unverified unless supported by proposal text.
+
     Produce one clear, concise consolidated review. Identify genuine conflicts between
     recommendations. Resolve them by prioritizing evidence from the proposal and
     specialist knowledge; when both are comparably supported, favor the more in-depth
@@ -186,6 +199,9 @@ solution_document_review_task:
     your view in simple terms. Do not re-review or alter the specialists' technical
     recommendations. Compare the document with the reconciled technical feedback
     and identify any specific documentation changes needed to keep it consistent.
+    Treat AI-generated diagram descriptions as fallible interpretations, not verified
+    OCR. Do not report exact labels from them as facts; identify them as unverified
+    when the original text cannot be confirmed.
     Distinguish checklist gaps and unknowns from proven design errors. Do not call
     missing evidence a confirmed flaw, and do not claim a design cannot work unless
     retrieved evidence supports that conclusion. Do not claim a document section
@@ -279,6 +295,10 @@ final_review_task:
 
     {user_request}
 
+    Do not repeat exact image-label claims from upstream reviews as facts unless
+    they are independently supported by proposal text. AI-generated diagram
+    descriptions are not verified OCR; label any dependent concern unverified.
+
     Make an implementation decision based on whether the design is likely to work
     and meet the functional requirements stated in the design. Give **Pass** when
     it is likely to do so and the reviews identify no architectural anti-pattern
@@ -292,16 +312,17 @@ final_review_task:
     reasoned judgment that stated requirements will be met or expose a blocking
     design risk.
 
-    If the decision is Fail, list the specific blocking changes required to satisfy
-    the Pass criteria. Order them by importance and include the source specialist
-    and the exact design-document area to update. For a text-based proposal, cite
-    its retrieved heading, page, figure, table, or paragraph; if a section is
-    missing, name a section to add rather than inventing an existing one. For an
-    image-only design, identify the visible diagram component or flow to change.
-    Do not list recommended or optional improvements as approval blockers. Never
-    list test-plan coverage gaps as a blocker or use the Testing & Verification
-    Strategist's rating to change the implementation decision. If the decision is
-    Pass, state that no blocking changes are required.
+    If the decision is Fail, list only the specific blocking changes required to
+    satisfy the Pass criteria. Order them from highest to lowest priority based
+    on severity and impact. Include the source specialist and exact
+    design-document area to update. For a text-based proposal, cite its retrieved
+    heading, page, figure, table, or paragraph; if a section is missing, name a
+    section to add rather than inventing an existing one. For an image-only
+    design, identify the visible diagram component or flow to change. Do not list
+    recommended or optional improvements as approval blockers. Never list
+    test-plan coverage gaps as a blocker or use the Testing & Verification
+    Strategist's rating to change the implementation decision. Omit the Changes
+    Required for Pass section completely when the decision is Pass.
 
     Summarize the proposed solution and its business purpose in plain, succinct
     language, grounded only in the review evidence. Further technical detail is
@@ -326,21 +347,24 @@ final_review_task:
     plan or very little relevant coverage is described. Summarize the coverage and
     the most important areas to test, with concise knowledge-base rationale.
   expected_output: >
-    Return concise Markdown with exactly these seven sections in this exact order
-    and no conversational filler. Bold the labels only; keep each rating or
-    decision result plain text.
+    Return concise Markdown with the following sections in this exact order and
+    no conversational filler. The Changes Required for Pass section is included
+    only when the decision is Fail. Put every section heading on its own line
+    with a blank line before it. Never concatenate sections or their content
+    into one paragraph. Bold the labels only; keep each rating or decision
+    result plain text. The Implementation Decision section must contain only the
+    single word Pass or Fail, with no rationale or additional text. Keep each
+    blocker as a separate bullet, ordered from highest to lowest priority, with
+    its source and design location on their own indented lines.
 
-    **Implementation Decision:** Pass / Fail
-    [Brief, evidence-based reason. Pass means the design is likely to work, meets
-    stated functional requirements, and has no identified architectural
-    anti-pattern or severe direct specialist violation. Ordinary recommendations
-    alone do not prevent a pass.]
+    **Implementation Decision:** [Pass or Fail]
 
+    [Include this next section only when the decision is Fail.]
     **Changes Required for Pass**
-    * **Blocking change:** [Specific action] — **Source:** [Specialist] —
+    * **Blocking change:** [Specific action]
+      **Source:** [Specialist]
       **Design location:** [Exact heading/page/figure/table or visible diagram
       component; name a section to add if none exists.]
-    [If Pass, write "None — no blocking changes are required."]
 
     **Solution Summary**
     [Plain, succinct summary of the solution, its purpose, and important overall

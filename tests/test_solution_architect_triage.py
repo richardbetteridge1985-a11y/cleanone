@@ -70,7 +70,7 @@ class FakeLLM:
 
 def test_assesses_all_domains_with_proposal_and_knowledge_evidence():
     agents = AgentFactory._load_yaml(AgentFactory._AGENTS_CONFIG_PATH)
-    triage = SolutionArchitectTriageAgent(agents, max_specialists=4)
+    triage = SolutionArchitectTriageAgent(agents)
     llm = FakeLLM(_response(("ddd_specialist", "nfr_specialist")))
     proposal_evidence = (
         "[Proposal Section: Overview]\n"
@@ -93,7 +93,6 @@ def test_assesses_all_domains_with_proposal_and_knowledge_evidence():
             llm=llm,
             user_request="Review the booking application.",
             proposal_uploaded=True,
-            available_agent_slots=2,
         )
 
     assert decision.solution_related
@@ -116,17 +115,17 @@ def test_assesses_all_domains_with_proposal_and_knowledge_evidence():
         assert agents[key]["knowledge_source"] in evidence
 
 
-def test_rejects_selection_over_available_slots():
-    with pytest.raises(ValueError, match="safe run limit"):
-        SolutionArchitectTriageAgent._parse_response(
-            _response(("ddd_specialist", "nfr_specialist")),
-            available_agent_slots=1,
-        )
+def test_accepts_all_core_specialists_when_each_is_selected():
+    decision = SolutionArchitectTriageAgent._parse_response(
+        _response(_CORE_AGENT_KEYS)
+    )
+
+    assert decision.selected_agent_keys == _CORE_AGENT_KEYS
 
 
 def test_retries_once_when_model_omits_a_core_assessment():
     agents = AgentFactory._load_yaml(AgentFactory._AGENTS_CONFIG_PATH)
-    triage = SolutionArchitectTriageAgent(agents, max_specialists=4)
+    triage = SolutionArchitectTriageAgent(agents)
     incomplete = json.loads(_response(("ddd_specialist",)))
     incomplete["agent_assessments"].pop()
     llm = FakeLLM([
@@ -143,7 +142,6 @@ def test_retries_once_when_model_omits_a_core_assessment():
             llm=llm,
             user_request="Review an appointment booking application.",
             proposal_uploaded=False,
-            available_agent_slots=4,
         )
 
     assert llm.call_count == 2
@@ -156,7 +154,6 @@ def test_extracts_json_from_markdown_wrapped_model_response():
 
     decision = SolutionArchitectTriageAgent._parse_response(
         response,
-        available_agent_slots=2,
     )
 
     assert decision.selected_agent_keys == ("ddd_specialist",)
@@ -169,7 +166,6 @@ def test_parses_pydantic_structured_response():
 
     decision = SolutionArchitectTriageAgent._parse_response(
         response_model,
-        available_agent_slots=2,
     )
 
     assert decision.selected_agent_keys == ("eda_specialist",)
@@ -177,7 +173,7 @@ def test_parses_pydantic_structured_response():
 
 def test_retries_empty_response_and_parses_wrapped_json():
     agents = AgentFactory._load_yaml(AgentFactory._AGENTS_CONFIG_PATH)
-    triage = SolutionArchitectTriageAgent(agents, max_specialists=4)
+    triage = SolutionArchitectTriageAgent(agents)
     llm = FakeLLM([
         "",
         f"```json\n{_response(('nfr_specialist',))}\n```",
@@ -192,7 +188,6 @@ def test_retries_empty_response_and_parses_wrapped_json():
             llm=llm,
             user_request="Review an appointment booking application.",
             proposal_uploaded=False,
-            available_agent_slots=2,
         )
 
     assert llm.call_count == 2
@@ -202,7 +197,7 @@ def test_retries_empty_response_and_parses_wrapped_json():
 
 def test_qwen_triage_disables_thinking_and_retries_output_limit():
     agents = AgentFactory._load_yaml(AgentFactory._AGENTS_CONFIG_PATH)
-    triage = SolutionArchitectTriageAgent(agents, max_specialists=4)
+    triage = SolutionArchitectTriageAgent(agents)
     llm = FakeLLM([
         LengthFinishReasonError(completion=SimpleNamespace(usage=None)),
         _response(("cqrs_specialist",)),
@@ -219,7 +214,6 @@ def test_qwen_triage_disables_thinking_and_retries_output_limit():
             llm=llm,
             user_request="Review a booking application.",
             proposal_uploaded=False,
-            available_agent_slots=2,
         )
 
     assert llm.call_count == 2
@@ -233,7 +227,6 @@ def test_rejects_non_json_model_response():
     with pytest.raises(ValueError, match="invalid JSON"):
         SolutionArchitectTriageAgent._parse_response(
             "I cannot provide structured output.",
-            available_agent_slots=2,
         )
 
 
@@ -241,13 +234,12 @@ def test_unrelated_material_cannot_select_specialists():
     with pytest.raises(ValueError, match="Unrelated material"):
         SolutionArchitectTriageAgent._parse_response(
             _response(("ddd_specialist",), solution_related=False),
-            available_agent_slots=2,
         )
 
 
 def test_propagates_knowledge_retrieval_errors():
     agents = AgentFactory._load_yaml(AgentFactory._AGENTS_CONFIG_PATH)
-    triage = SolutionArchitectTriageAgent(agents, max_specialists=4)
+    triage = SolutionArchitectTriageAgent(agents)
 
     with patch.object(
         RAGEngine,
@@ -259,5 +251,4 @@ def test_propagates_knowledge_retrieval_errors():
                 llm=FakeLLM(_response()),
                 user_request="An appointment booking app.",
                 proposal_uploaded=False,
-                available_agent_slots=4,
             )

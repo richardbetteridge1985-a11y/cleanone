@@ -2,11 +2,12 @@
 import json
 import logging
 import os
+import re
 import time
 import yaml
 from crewai import Agent, Task, Crew
 from src.rag_engine import RAGEngine, ScopedKnowledgeTool
-from src.output_cleanup import clean_conditional_code_section
+from src.output_cleanup import clean_conditional_code_section, format_overall_review
 from src.proposal_processor import ProposalProcessor, ProposalSearchTool
 from src.solution_architect_triage import SolutionArchitectTriageAgent, TriageDecision
 
@@ -20,6 +21,49 @@ _CORE_SPECIALIST_KEYS = {
     "eda_specialist",
     "nfr_specialist",
 }
+_CLOUD_ROUTING_RULES = {
+    "aws_specialist": (
+        re.compile(r"\b(?:aws|amazon web services)\b"),
+        re.compile(
+            r"\b(?:amazon\s+s3|aws\s+s3|s3|"
+            r"(?:aws\s+)?lambda\s+(?:function|service)|aws\s+lambda|"
+            r"(?:amazon\s+)?sqs\b|"
+            r"(?:aws\s+)?ecs\s+(?:service|cluster|task)|"
+            r"(?:aws\s+)?eks(?:\s+(?:service|cluster))?|dynamodb(?:\s+table)?|"
+            r"ec2\s+instances?|rds\s+(?:instance|database)|cloudfront)\b"
+        ),
+    ),
+    "azure_specialist": (
+        re.compile(r"\b(?:azure|microsoft azure)\b"),
+        re.compile(
+            r"\b(?:azure\s+service bus|service bus namespace|cosmos\s+db|"
+            r"aks(?:\s+cluster)?|entra\s+id|azure\s+functions?|"
+            r"azure\s+blob storage|azure\s+sql|azure\s+app service|"
+            r"azure\s+key vault)\b"
+        ),
+    ),
+    "gcp_specialist": (
+        re.compile(r"\b(?:gcp|google cloud)\b"),
+        re.compile(
+            r"\b(?:google cloud\s+(?:run|storage|sql|pub/?sub|spanner|bigquery)|"
+            r"cloud run|bigquery|gke|google kubernetes engine|firestore|"
+            r"cloud sql|cloud pub/?sub|vertex ai|gcs bucket)\b"
+        ),
+    ),
+}
+_CLOUD_USAGE_PATTERN = re.compile(
+    r"\b(?:use[sd]?|using|deploy(?:s|ed|ing)?|host(?:s|ed|ing)?|"
+    r"run(?:s|ning)?|built|provision(?:s|ed|ing)?|operat(?:es|ed|ing)|"
+    r"stor(?:e|es|ed|ing)|migrat(?:e|es|ed|ing)|target(?:s|ed)?)\b"
+)
+_CLOUD_DESIGN_CONTEXT_PATTERN = re.compile(
+    r"\b(?:architecture|diagram|deployment|infrastructure|platform|account|"
+    r"region|workload|environment)\b"
+)
+_CLOUD_UNCERTAIN_PATTERN = re.compile(
+    r"\b(?:not|never|without|avoid|consider(?:ing)?|compare(?:d|s|ing)?|"
+    r"alternative(?:s)?|maybe|might|could|would|potential|option(?:s|al)?|possibly)\b"
+)
 
 
 class AgentFactory:
@@ -98,13 +142,12 @@ class AgentFactory:
             agent_config=agents_metadata[config_key],
             task_config=tasks_metadata[task_key],
             llm_instance=llm,
-            proposal_uploaded=proposal_uploaded
+            proposal_uploaded=proposal_uploaded,
+            single_specialist=True,
         )
 
 class SmartPanelRunner:
-    """Runs a bounded set of relevant specialists configured in agents.yaml."""
-
-    MAX_SPECIALISTS = 4
+    """Runs all relevant specialists configured in agents.yaml."""
 
     def __init__(
         self,
@@ -120,24 +163,46 @@ class SmartPanelRunner:
 
     def _select_additional_specialists(self, routing_text: str) -> list[tuple[str, dict]]:
         routing_text = routing_text.casefold()
-        selected = [
-            (profile_key, agent_config)
-            for profile_key, agent_config in self.agents_metadata.items()
-            if profile_key not in _CORE_SPECIALIST_KEYS
-            and not agent_config.get("internal_only")
-            and (
-                agent_config.get("always_include")
-                or (
+        selected = []
+        for profile_key, agent_config in self.agents_metadata.items():
+            if profile_key in _CORE_SPECIALIST_KEYS or agent_config.get("internal_only"):
+                continue
+            if agent_config.get("always_include"):
+                selected.append((profile_key, agent_config))
+                continue
+
+            if profile_key in _CLOUD_ROUTING_RULES:
+                is_relevant = self._cloud_usage_is_evident(profile_key, routing_text)
+            else:
+                is_relevant = (
                     not agent_config.get("routing_keywords")
                     and not agent_config.get("conditional_routing")
-                )
-                or any(
+                ) or any(
                     keyword.casefold() in routing_text
                     for keyword in agent_config.get("routing_keywords", [])
                 )
-            )
-        ]
+            if is_relevant:
+                selected.append((profile_key, agent_config))
         return selected
+
+    @staticmethod
+    def _cloud_usage_is_evident(profile_key: str, routing_text: str) -> bool:
+        provider_pattern, service_pattern = _CLOUD_ROUTING_RULES[profile_key]
+        for sentence in re.split(r"(?<=[.!?;])\s+|\n+", routing_text):
+            provider_match = provider_pattern.search(sentence)
+            service_matches = list(service_pattern.finditer(sentence))
+            for match in ([provider_match] if provider_match else []) + service_matches:
+                context = sentence[max(0, match.start() - 48):match.end() + 48]
+                if _CLOUD_UNCERTAIN_PATTERN.search(context):
+                    continue
+                if service_pattern.fullmatch(match.group()):
+                    return True
+                if provider_match and (
+                    _CLOUD_USAGE_PATTERN.search(context)
+                    or _CLOUD_DESIGN_CONTEXT_PATTERN.search(context)
+                ):
+                    return True
+        return False
 
     def _select_specialists(
         self,
@@ -146,10 +211,10 @@ class SmartPanelRunner:
         additional_selected: list[tuple[str, dict]] | None = None,
     ) -> list[tuple[str, dict]]:
         if triage_selected is None:
-            selected = [
-                (profile_key, agent_config)
+            selected_keys = {
+                profile_key
                 for profile_key, agent_config in self.agents_metadata.items()
-                if not agent_config.get("internal_only")
+                if profile_key in _CORE_SPECIALIST_KEYS
                 and (
                     agent_config.get("always_include")
                     or (
@@ -161,6 +226,15 @@ class SmartPanelRunner:
                         for keyword in agent_config.get("routing_keywords", [])
                     )
                 )
+            }
+            selected_keys.update(
+                profile_key
+                for profile_key, _ in self._select_additional_specialists(routing_text)
+            )
+            selected = [
+                (profile_key, agent_config)
+                for profile_key, agent_config in self.agents_metadata.items()
+                if profile_key in selected_keys
             ]
         else:
             selected_keys = set(triage_selected)
@@ -171,18 +245,6 @@ class SmartPanelRunner:
             ]
             selected.extend(additional_selected or [])
 
-        if len(selected) > self.MAX_SPECIALISTS:
-            names = ", ".join(config["role"] for _, config in selected)
-            logger.warning(
-                "Smart Panel selection exceeded safety limit selected=%d limit=%d",
-                len(selected),
-                self.MAX_SPECIALISTS,
-            )
-            raise ValueError(
-                f"Smart Panel selected {len(selected)} specialists, exceeding the "
-                f"safety limit of {self.MAX_SPECIALISTS}: {names}. Narrow the request "
-                "or use Single Specialist Review."
-            )
         return selected
 
     def run(self, user_request: str):
@@ -194,42 +256,16 @@ class SmartPanelRunner:
             routing_text = user_request
 
         additional_candidates = self._select_additional_specialists(routing_text)
-        always_included = [
-            candidate for candidate in additional_candidates
-            if candidate[1].get("always_include")
-        ]
-        optional_candidates = [
-            candidate for candidate in additional_candidates
-            if not candidate[1].get("always_include")
-        ]
-        available_additional_slots = self.MAX_SPECIALISTS - 1
-        if len(always_included) > available_additional_slots:
-            raise ValueError(
-                "Always-included specialists exceed the Smart Panel safety limit "
-                "while reserving a slot for solution-specific triage."
-            )
-        selected_optional_count = max(
-            0,
-            available_additional_slots - len(always_included),
-        )
-        omitted_additional = optional_candidates[selected_optional_count:]
-        additional_candidates = (
-            always_included + optional_candidates[:selected_optional_count]
-        )
-        available_core_slots = self.MAX_SPECIALISTS - len(additional_candidates)
         triage = SolutionArchitectTriageAgent(
             agents_metadata=self.agents_metadata,
-            max_specialists=self.MAX_SPECIALISTS,
         ).assess(
             llm=self.llm,
             user_request=user_request,
             proposal_uploaded=self.proposal_uploaded,
-            available_agent_slots=available_core_slots,
         )
         triage_report = self._format_triage_report(
             triage,
             additional_candidates,
-            omitted_additional,
         )
         if not triage.solution_related:
             yield (
@@ -360,6 +396,7 @@ class SmartPanelRunner:
                 f"{testing_review or 'Testing specialist feedback was unavailable.'}"
             )
         )
+        overall_review = format_overall_review(overall_review)
 
         yield (
             f"{triage_report}\n\n---\n\n"
@@ -377,7 +414,6 @@ class SmartPanelRunner:
         self,
         triage: TriageDecision,
         additional_selected: list[tuple[str, dict]],
-        omitted_additional: list[tuple[str, dict]],
     ) -> str:
         selected_keys = set(triage.selected_agent_keys)
         assessment_by_key = {
@@ -399,11 +435,6 @@ class SmartPanelRunner:
             for key in assessment_by_key
             if key not in selected_keys
         ]
-        not_selected_lines.extend(
-            f"- **{config['role']}** — not selected because the Smart Panel "
-            "specialist safety limit was reached."
-            for _, config in omitted_additional
-        )
         selected_text = "\n".join(selected_lines) if selected_lines else "- None"
         not_selected_text = "\n".join(not_selected_lines) if not_selected_lines else "- None"
         return (
@@ -466,12 +497,14 @@ class AgentRunner:
         agent_config: dict,
         task_config: dict,
         llm_instance,
-        proposal_uploaded: bool = False
+        proposal_uploaded: bool = False,
+        single_specialist: bool = False,
     ):
         self.agent_config = agent_config
         self.task_config = task_config
         self.llm = llm_instance
         self.proposal_uploaded = proposal_uploaded
+        self.single_specialist = single_specialist
         self.proposal_evidence_retrieved = False
 
     def execute_sync(self, user_request: str) -> str:
@@ -503,8 +536,8 @@ class AgentRunner:
             )
             if proposal_context.startswith("Error querying uploaded proposal:"):
                 raise RuntimeError("Could not retrieve evidence from the uploaded proposal.")
-            self.proposal_evidence_retrieved = proposal_context.startswith(
-                "[Proposal Section:"
+            self.proposal_evidence_retrieved = (
+                ProposalProcessor.has_proposal_evidence(proposal_context)
             )
             retrieved_context.append(
                 f"--- UPLOADED PROPOSAL EVIDENCE ---\n{proposal_context}"
@@ -521,6 +554,54 @@ class AgentRunner:
             task_input += (
                 "\n\n--- PRE-RETRIEVED REVIEW EVIDENCE ---\n"
                 + "\n\n".join(retrieved_context)
+            )
+
+        task_description_template = self.task_config["description"]
+        expected_output = self.task_config["expected_output"]
+        is_testing_specialist = (
+            self.agent_config["role"] == "Testing & Verification Strategist"
+        )
+        if self.single_specialist:
+            if not is_testing_specialist:
+                task_description_template = self._remove_template_section(
+                    task_description_template,
+                    "If your assigned role is Testing & Verification Strategist,",
+                    "Apply these evaluation rules:",
+                )
+                expected_output = self._remove_template_section(
+                    expected_output,
+                    "**Testing Plan Coverage**",
+                    "**Summary of Additional Minor Tweaks**",
+                )
+        task_description = task_description_template.format(
+            user_request=task_input
+        )
+        if self.single_specialist:
+            task_description += (
+                "\n\n--- SINGLE-SPECIALIST SCOPE ---\n"
+                f"You are the only selected specialist: {self.agent_config['role']}. "
+                "Review only your assigned specialty. Do not review other domains, "
+                "provide an overall solution/documentation assessment, or imply "
+                "that another agent ran. This instruction takes precedence over "
+                "broader requests in the supplied prompt. "
+                + (
+                    "As the Testing & Verification Strategist, cover testing only; "
+                    "do not review other architectural domains."
+                    if is_testing_specialist
+                    else
+                    "Do not assess test-plan coverage, recommend tests, or include "
+                    "testing commentary; that belongs to the Testing & Verification "
+                    "Strategist in Smart Panel reviews."
+                )
+            )
+            expected_output += (
+                "\n\nSingle-specialist output must stay within "
+                f"{self.agent_config['role']}'s assigned scope. "
+                + (
+                    "Include testing coverage only; omit other domain reviews."
+                    if is_testing_specialist
+                    else "Omit all reviews and recommendations outside the assigned specialty."
+                )
             )
 
         tools = []
@@ -553,8 +634,8 @@ class AgentRunner:
         )
         
         crew_task = Task(
-            description=self.task_config["description"].format(user_request=task_input),
-            expected_output=self.task_config["expected_output"],
+            description=task_description,
+            expected_output=expected_output,
             agent=crew_agent
         )
         
@@ -565,10 +646,12 @@ class AgentRunner:
         )
         
         logger.info(
-            "Agent execution started role=%s tool_count=%d proposal_uploaded=%s",
+            "Agent execution started role=%s tool_count=%d proposal_uploaded=%s "
+            "single_specialist=%s",
             self.agent_config["role"],
             len(tools),
             self.proposal_uploaded,
+            self.single_specialist,
         )
         try:
             raw_response = str(crew.kickoff()).strip()
@@ -591,9 +674,7 @@ class AgentRunner:
                 }
             )
             raw_response = self._retry_without_tools(
-                task_description=self.task_config["description"].format(
-                    user_request=task_input
-                ),
+                task_description=task_description,
                 llm_instance=retry_llm,
                 retry_instruction=(
                     "The previous attempt returned no review content. Use only "
@@ -601,6 +682,7 @@ class AgentRunner:
                     "a concise review in the requested format."
                 ),
                 max_execution_time=60,
+                expected_output=expected_output,
             )
         if self._is_unexecuted_tool_call(raw_response):
             logger.warning(
@@ -608,9 +690,7 @@ class AgentRunner:
                 self.agent_config["role"],
             )
             raw_response = self._retry_without_tools(
-                task_description=self.task_config["description"].format(
-                    user_request=task_input
-                ),
+                task_description=task_description,
                 llm_instance=self.llm,
                 retry_instruction=(
                     "Your previous response was an unexecuted tool-call payload, "
@@ -619,6 +699,7 @@ class AgentRunner:
                     "in its specified format."
                 ),
                 max_execution_time=180,
+                expected_output=expected_output,
             )
             if self._is_unexecuted_tool_call(raw_response):
                 raise RuntimeError(
@@ -645,6 +726,7 @@ class AgentRunner:
         llm_instance,
         retry_instruction: str,
         max_execution_time: int,
+        expected_output: str,
     ) -> str:
         retry_agent = Agent(
             role=self.agent_config["role"],
@@ -659,7 +741,7 @@ class AgentRunner:
         )
         retry_task = Task(
             description=f"{task_description}\n\n{retry_instruction}",
-            expected_output=self.task_config["expected_output"],
+            expected_output=expected_output,
             agent=retry_agent,
         )
         return str(
@@ -698,6 +780,20 @@ class AgentRunner:
         if "action" in keys and keys.intersection({"action_input", "input"}):
             return True
         return keys == {"query"} and isinstance(payload["query"], str)
+
+    @staticmethod
+    def _remove_template_section(
+        template: str,
+        start_marker: str,
+        end_marker: str,
+    ) -> str:
+        start = template.find(start_marker)
+        end = template.find(end_marker, start + len(start_marker))
+        if start < 0 or end < 0:
+            raise ValueError(
+                "Could not apply single-specialist scope to the review template."
+            )
+        return template[:start] + template[end:]
 
     def run(self, user_request: str):
         try:

@@ -31,9 +31,8 @@ not a design defect. Do not confuse current-state context with a target-state
 recommendation. If evidence is insufficient, explain that and do not assume the
 pattern is required.
 
-Select no more than the provided available-agent limit. If more domains seem
-relevant than can safely run, prioritize those with the strongest evidence and
-explain non-selection due to the limit.
+Assess every specialist independently and select each one whose lens is useful
+for the evidenced solution. There is no specialist-count limit.
 
 Reject material only when it is clearly and entirely unrelated to software or a
 digital solution. Any plausible software attempt, including a vague or incomplete
@@ -108,22 +107,15 @@ class TriageDecision:
 class SolutionArchitectTriageAgent:
     """Classifies a solution and chooses bounded specialist coverage."""
 
-    def __init__(self, agents_metadata: dict, max_specialists: int):
+    def __init__(self, agents_metadata: dict):
         self.agents_metadata = agents_metadata
-        self.max_specialists = max_specialists
 
     def assess(
         self,
         llm,
         user_request: str,
         proposal_uploaded: bool,
-        available_agent_slots: int,
     ) -> TriageDecision:
-        if not 0 <= available_agent_slots <= self.max_specialists:
-            raise ValueError(
-                "Available specialist slots must be within the Smart Panel safety limit."
-            )
-
         started = time.perf_counter()
         prompt = user_request[:_MAX_PROMPT_CHARS] or "[empty]"
         proposal_context = ""
@@ -190,7 +182,6 @@ class SolutionArchitectTriageAgent:
             )
 
         evidence = (
-            f"Available core specialist slots: {available_agent_slots}\n\n"
             f"User request:\n{prompt}\n\n"
             f"Retrieved proposal evidence:\n{proposal_context or '[no uploaded document]'}\n\n"
             "Retrieved specialist knowledge:\n"
@@ -199,10 +190,8 @@ class SolutionArchitectTriageAgent:
             + "\n".join(_CORE_AGENT_KEYS)
         )
         logger.info(
-            "Solution architect triage started proposal_uploaded=%s "
-            "available_core_slots=%d",
+            "Solution architect triage started proposal_uploaded=%s",
             proposal_uploaded,
-            available_agent_slots,
         )
         messages = [
             {"role": "system", "content": _SYSTEM_PROMPT},
@@ -243,7 +232,7 @@ class SolutionArchitectTriageAgent:
                 not response.strip() if isinstance(response, str) else False,
             )
             try:
-                decision = self._parse_response(response, available_agent_slots)
+                decision = self._parse_response(response)
                 break
             except ValueError:
                 if attempt == 1:
@@ -294,7 +283,7 @@ class SolutionArchitectTriageAgent:
                 "content": (
                     f"{evidence}\n\nCorrection required: {reason} Return only one "
                     "valid JSON object, with exactly one assessment for each of the "
-                    "five specialist keys. Do not exceed the available-agent limit."
+                    "five specialist keys."
                 ),
             },
         ]
@@ -302,7 +291,6 @@ class SolutionArchitectTriageAgent:
     @staticmethod
     def _parse_response(
         response: str | dict | _TriageResponse,
-        available_agent_slots: int,
     ) -> TriageDecision:
         if isinstance(response, _TriageResponse):
             result = response.model_dump()
@@ -351,10 +339,6 @@ class SolutionArchitectTriageAgent:
             raise ValueError(
                 "Triage must assess all five core specialist domains. Missing: "
                 + ", ".join(sorted(missing))
-            )
-        if sum(assessment.selected for assessment in assessments) > available_agent_slots:
-            raise ValueError(
-                "Triage selected more core specialists than the safe run limit allows."
             )
         if not result["solution_related"] and any(
             assessment.selected for assessment in assessments

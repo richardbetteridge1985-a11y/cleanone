@@ -20,6 +20,15 @@ _TEMPLATE_LINE_PATTERN = re.compile(
     r"Show a concrete change for the location identified above",
     re.IGNORECASE,
 )
+_OVERALL_REVIEW_HEADINGS = (
+    "**Implementation Decision:**",
+    "**Changes Required for Pass**",
+    "**Solution Summary**",
+    "**Solution Document Rating:**",
+    "**Documentation Summary**",
+    "**Testing Plan Coverage:**",
+    "**Testing Summary**",
+)
 
 
 def clean_conditional_code_section(response: str) -> str:
@@ -84,3 +93,84 @@ def clean_conditional_code_section(response: str) -> str:
         + lines[section_end:]
     )
     return re.sub(r"\n{3,}", "\n\n", "".join(cleaned_lines)).strip()
+
+
+def format_overall_review(response: str) -> str:
+    formatted = response.strip()
+    for heading in _OVERALL_REVIEW_HEADINGS:
+        formatted = re.sub(
+            rf"[ \t]*{re.escape(heading)}[ \t]*",
+            f"\n\n{heading}\n",
+            formatted,
+        )
+
+    decision_heading = _OVERALL_REVIEW_HEADINGS[0]
+    decision_start = formatted.find(decision_heading)
+    if decision_start < 0:
+        raise ValueError("Final review omitted the Implementation Decision section.")
+    next_heading_positions = [
+        position
+        for heading in _OVERALL_REVIEW_HEADINGS[1:]
+        if (position := formatted.find(heading, decision_start + len(decision_heading))) >= 0
+    ]
+    decision_end = min(next_heading_positions, default=len(formatted))
+    decision_content = formatted[
+        decision_start + len(decision_heading):decision_end
+    ]
+    decision_match = re.match(
+        r"\s*(?:\*\*)?(Pass|Fail)\b(?:\*\*)?",
+        decision_content,
+        re.IGNORECASE,
+    )
+    if decision_match is None:
+        raise ValueError("Final review did not return a Pass or Fail decision.")
+    decision = decision_match.group(1).capitalize()
+    formatted = (
+        formatted[:decision_start]
+        + f"{decision_heading}\n{decision}\n\n"
+        + formatted[decision_end:].lstrip()
+    )
+
+    changes_heading = _OVERALL_REVIEW_HEADINGS[1]
+    changes_start = formatted.find(changes_heading)
+    if decision == "Pass" and changes_start >= 0:
+        following_heading_positions = [
+            position
+            for heading in _OVERALL_REVIEW_HEADINGS[2:]
+            if (position := formatted.find(heading, changes_start + len(changes_heading))) >= 0
+        ]
+        changes_end = min(following_heading_positions, default=len(formatted))
+        formatted = (
+            formatted[:changes_start].rstrip()
+            + "\n\n"
+            + formatted[changes_end:].lstrip()
+        )
+        logger.info("Removed changes-required section for Pass decision")
+    elif decision == "Fail":
+        if changes_start < 0:
+            raise ValueError("Final review omitted required changes for a Fail decision.")
+        following_heading_positions = [
+            position
+            for heading in _OVERALL_REVIEW_HEADINGS[2:]
+            if (position := formatted.find(heading, changes_start + len(changes_heading))) >= 0
+        ]
+        changes_end = min(following_heading_positions, default=len(formatted))
+        if "**Blocking change:**" not in formatted[changes_start:changes_end]:
+            raise ValueError("Final review listed no blocking changes for a Fail decision.")
+
+    formatted = re.sub(
+        r"[ \t]*—[ \t]*(\*\*(?:Source|Design location):\*\*)",
+        r"\n  \1",
+        formatted,
+    )
+    formatted = re.sub(
+        r"(?m)(?<!\n)[ \t]+\*\s+(?=\*\*Blocking change:\*\*)",
+        "\n* ",
+        formatted,
+    )
+    formatted = re.sub(
+        r"(?m)^(?![ \t]*[*-])[ \t]*(?=\*\*Blocking change:\*\*)",
+        "* ",
+        formatted,
+    )
+    return re.sub(r"\n{3,}", "\n\n", formatted).strip()

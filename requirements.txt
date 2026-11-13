@@ -1,6 +1,6 @@
 # --- Core Infrastructure and Presentation ---
 gradio==4.44.1
-ollama==0.3.3
+ollama==0.6.3
 litellm==1.49.0
 
 # --- Multi-Agent Orchestration ---

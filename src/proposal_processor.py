@@ -5,6 +5,9 @@ import re
 import tempfile
 import shutil
 import time
+import json
+from typing import Literal
+
 import docx
 import pymupdf
 import chromadb
@@ -13,10 +16,31 @@ import boto3
 from botocore.config import Config
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from crewai.tools import BaseTool
-from pydantic import BaseModel, Field, PrivateAttr
+from pydantic import BaseModel, Field, PrivateAttr, ValidationError
 
 
 logger = logging.getLogger(__name__)
+
+
+class DiagramTechnology(BaseModel):
+    name: str
+    evidence: str
+
+
+class DiagramAnalysis(BaseModel):
+    classification: Literal[
+        "solution_architecture",
+        "non_architecture",
+        "uncertain",
+    ]
+    diagram_type: str
+    technologies: list[DiagramTechnology]
+    goal: str
+    components: list[str]
+    flows: list[str]
+    solution_map: list[str]
+    confidence: Literal["high", "medium", "low"]
+    uncertainties: list[str]
 
 
 class ProposalProcessor:
@@ -25,9 +49,11 @@ class ProposalProcessor:
     _SESSION_DB_PATH = os.path.join("config", "session_proposal_db")
     _COLLECTION_NAME = "active_proposal"
     _MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+    _MAX_IMAGES_TO_CLASSIFY_PER_UPLOAD = 20
     _MAX_DIAGRAMS_PER_UPLOAD = 5
-    _VISION_TIMEOUT_SECONDS = 120
-    _LOCAL_VISION_MAX_OUTPUT_TOKENS = 512
+    _VISION_TIMEOUT_SECONDS = 60
+    _MAX_VISION_ANALYSIS_SECONDS_PER_UPLOAD = 180
+    _LOCAL_VISION_MAX_OUTPUT_TOKENS = 1024
     _OLLAMA_VISION_MODEL = os.getenv("CLEANONE_OLLAMA_VISION_MODEL", "qwen3.5:9b")
     _SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
     _SUPPORTED_EXTENSIONS = {".docx", ".pdf", ".md"} | _SUPPORTED_IMAGE_EXTENSIONS
@@ -86,13 +112,29 @@ class ProposalProcessor:
             else:
                 raise ValueError(f"Unsupported file format: {ext}")
 
-            total_images = sum(len(s["images"]) for s in sections)
-            if total_images > cls._MAX_DIAGRAMS_PER_UPLOAD:
-                raise ValueError(
-                    f"Proposal contains {total_images} diagrams; the limit is "
-                    f"{cls._MAX_DIAGRAMS_PER_UPLOAD}. Reduce the number of diagrams "
-                    "or split the proposal before reviewing it."
+            image_jobs = [
+                (image_index, section, img_path)
+                for image_index, (section, img_path) in enumerate(
+                    (
+                        (section, img_path)
+                        for section in sections
+                        for img_path in section["images"]
+                    ),
+                    start=1,
                 )
+            ]
+            total_images = len(image_jobs)
+            image_jobs.sort(
+                key=lambda job: (
+                    cls._image_context_priority(job[1]),
+                    job[0],
+                )
+            )
+            skipped_images = max(
+                0,
+                total_images - cls._MAX_IMAGES_TO_CLASSIFY_PER_UPLOAD,
+            )
+            image_jobs = image_jobs[:cls._MAX_IMAGES_TO_CLASSIFY_PER_UPLOAD]
             logger.info(
                 "Proposal extraction completed sections=%d diagrams=%d "
                 "duration_seconds=%.2f",
@@ -100,50 +142,119 @@ class ProposalProcessor:
                 total_images,
                 time.perf_counter() - started,
             )
-            img_counter = 0
-            analysed_images = 0
+            architecture_diagrams = 0
+            image_attempts = 0
+            ignored_images = 0
+            uncertain_images = 0
             failed_images = 0
             vision_failure_reason = None
             vision_preflight_error = None
             if total_images and "Ollama" in backend_choice:
                 vision_preflight_error = cls._check_ollama_vision_model()
 
-            for section in sections:
-                diagram_descriptions = []
-                for img_path in section["images"]:
-                    img_counter += 1
-                    if progress_callback:
-                        progress_callback(
-                            f"Analysing diagram {img_counter}/{total_images} "
-                            f"under '{section['heading']}'..."
-                        )
-                    logger.info(
-                        "Proposal diagram analysis started diagram=%d total=%d backend=%s",
-                        img_counter,
-                        total_images,
-                        backend_choice,
+            diagram_sections = []
+            analysis_started = time.perf_counter()
+            for attempt_index, (image_index, section, img_path) in enumerate(
+                image_jobs,
+                start=1,
+            ):
+                if architecture_diagrams >= cls._MAX_DIAGRAMS_PER_UPLOAD:
+                    skipped_images += len(image_jobs) - attempt_index + 1
+                    break
+                if (
+                    time.perf_counter() - analysis_started
+                    >= cls._MAX_VISION_ANALYSIS_SECONDS_PER_UPLOAD
+                ):
+                    skipped_images += len(image_jobs) - attempt_index + 1
+                    logger.warning(
+                        "Proposal image analysis budget reached skipped_images=%d",
+                        skipped_images,
                     )
-                    if vision_preflight_error:
-                        desc = vision_preflight_error
-                    else:
-                        desc = cls._describe_diagram(
-                            img_path, section["heading"], backend_choice
-                        )
+                    break
 
-                    if desc.startswith("[Vision Analysis Failed:"):
-                        failed_images += 1
-                        vision_failure_reason = vision_failure_reason or desc.strip("[]")
-                        diagram_descriptions.append(
-                            "[Diagram image present; vision analysis failed.]"
-                        )
-                    else:
-                        analysed_images += 1
-                        diagram_descriptions.append(
-                            f"[Extracted Diagram Description]:\n{desc}"
-                        )
+                if progress_callback:
+                    progress_callback(
+                        f"Classifying image {attempt_index}/{len(image_jobs)} "
+                        f"under '{section['heading']}'..."
+                    )
+                logger.info(
+                    "Proposal image classification started image=%d total=%d backend=%s",
+                    attempt_index,
+                    len(image_jobs),
+                    backend_choice,
+                )
+                image_attempts += 1
+                if vision_preflight_error:
+                    response_text = vision_preflight_error
+                else:
+                    response_text = cls._describe_diagram(
+                        img_path, section["heading"], backend_choice
+                    )
 
-                if diagram_descriptions:
-                    section["text"] += "\n\n" + "\n\n".join(diagram_descriptions)
+                if response_text.startswith("[Vision Analysis Failed:"):
+                    failed_images += 1
+                    vision_failure_reason = (
+                        vision_failure_reason or response_text.strip("[]")
+                    )
+                    continue
+
+                analysis = cls._parse_diagram_analysis(response_text)
+                if analysis is None:
+                    failed_images += 1
+                    vision_failure_reason = (
+                        vision_failure_reason
+                        or "Vision model returned an invalid structured analysis."
+                    )
+                    logger.warning(
+                        "Proposal image classification response invalid image=%d",
+                        attempt_index,
+                    )
+                    continue
+
+                if analysis.classification == "non_architecture":
+                    ignored_images += 1
+                    logger.info(
+                        "Proposal image ignored image=%d classification=%s "
+                        "diagram_type=%s confidence=%s",
+                        attempt_index,
+                        analysis.classification,
+                        analysis.diagram_type,
+                        analysis.confidence,
+                    )
+                    continue
+                if analysis.classification == "uncertain":
+                    uncertain_images += 1
+                    logger.warning(
+                        "Proposal image classification uncertain image=%d "
+                        "diagram_type=%s confidence=%s",
+                        attempt_index,
+                        analysis.diagram_type,
+                        analysis.confidence,
+                    )
+                    continue
+
+                architecture_diagrams += 1
+                diagram_sections.append({
+                    "heading": (
+                        f"{section['heading']} - Architectural Diagram {image_index}"
+                    ),
+                    "text": (
+                        "[AI-generated diagram analysis; not verified OCR]\n"
+                        + cls._format_diagram_analysis(analysis)
+                    ),
+                    "images": [],
+                    "kind": "diagram",
+                })
+                logger.info(
+                    "Proposal architectural diagram classified image=%d "
+                    "diagram_type=%s technologies=%d confidence=%s",
+                    attempt_index,
+                    analysis.diagram_type,
+                    len(analysis.technologies),
+                    analysis.confidence,
+                )
+
+            sections.extend(diagram_sections)
 
             if progress_callback:
                 progress_callback("Indexing proposal into session vector store...")
@@ -159,8 +270,12 @@ class ProposalProcessor:
             toc = [s["heading"] for s in sections if s["heading"]]
             summary = (
                 f"Proposal File: {os.path.basename(file_path)} | "
-                f"Sections: {len(sections)} | Diagrams Analysed: "
-                f"{analysed_images}/{total_images}; Analysis Failures: {failed_images}\n"
+                f"Sections: {len(sections)} | Images Attempted: "
+                f"{image_attempts}/{total_images}; "
+                f"Architecture Diagrams Analysed: {architecture_diagrams}; "
+                f"Images Ignored: {ignored_images}; Classification Uncertain: "
+                f"{uncertain_images}; Analysis Failures: {failed_images}; "
+                f"Images Skipped: {skipped_images}\n"
                 + (
                     f"Vision Analysis Note: {vision_failure_reason}\n"
                     if vision_failure_reason
@@ -170,12 +285,18 @@ class ProposalProcessor:
             )
             logger.info(
                 "Proposal processing completed sections=%d diagrams=%d "
-                "diagrams_analysed=%d diagram_analysis_failures=%d "
+                "images_attempted=%d diagrams_analysed=%d images_ignored=%d "
+                "images_uncertain=%d "
+                "image_analysis_failures=%d images_skipped=%d "
                 "duration_seconds=%.2f",
                 len(sections),
                 total_images,
-                analysed_images,
+                image_attempts,
+                architecture_diagrams,
+                ignored_images,
+                uncertain_images,
                 failed_images,
+                skipped_images,
                 time.perf_counter() - started,
             )
             return summary
@@ -305,7 +426,31 @@ class ProposalProcessor:
                 if rel_id in xml_str and img_path not in sections[-1]["images"]:
                     sections[-1]["images"].append(img_path)
 
+        assigned_images = {
+            img_path for section in sections for img_path in section["images"]
+        }
+        unassigned_images = [
+            img_path for img_path in rel_to_img.values()
+            if img_path not in assigned_images
+        ]
+        if unassigned_images:
+            sections.append({
+                "heading": "Embedded Images Without Paragraph Context",
+                "text": "",
+                "images": unassigned_images,
+            })
+
         return sections
+
+    @staticmethod
+    def _image_context_priority(section: dict) -> int:
+        context = f"{section['heading']}\n{section['text'][:1500]}".casefold()
+        architecture_terms = (
+            r"\barchitecture\b|\barchitectural\b|\bc4\b|\bdiagram\b|"
+            r"\bdeployment\b|\btopology\b|\bsequence\b|\bprocess flow\b|"
+            r"\bdata flow\b|\bsystem design\b"
+        )
+        return 0 if re.search(architecture_terms, context) else 1
 
     @classmethod
     def _extract_pdf(cls, file_path: str, img_dir: str) -> list[dict]:
@@ -357,17 +502,26 @@ class ProposalProcessor:
 
     @classmethod
     def _describe_diagram(cls, img_path: str, section_heading: str, backend_choice: str) -> str:
-        """Uses a Vision LLM to convert an architecture/flow diagram into structured text."""
+        """Classifies an image and describes relevant solution-architecture diagrams."""
         started = time.perf_counter()
         vision_prompt = (
-            f"You are a Principal Solutions Architect analysing a diagram from the section '{section_heading}' "
-            "of a technical proposal. Break down the visual intent completely:\n"
-            "1. Diagram Type (e.g., Cloud Topology, Sequence Flow, Data Pipeline, Bounded Context Map).\n"
-            "2. Components & Services (list every box, database, queue, actor, and cloud service).\n"
-            "3. Data Flows & Interactions (trace every arrow, direction, sync/async protocol, and event).\n"
-            "4. Boundaries & Trust Zones (VPCs, subnets, bounded contexts, external third parties).\n"
-            "Be exhaustive and precise so another architect can review this design without seeing the image."
-        )
+            f"You are reviewing image {os.path.basename(img_path)} from the proposal section "
+            f"'{section_heading}'. First decide whether it is a solution-architecture diagram.\n"
+            "Include cloud architecture, C4/context/container/component, deployment/network, "
+            "sequence, process-flow, and data-flow diagrams. Classify photos, decorative images, "
+            "logos without architecture, and unrelated charts as non_architecture. If unclear, "
+            "use uncertain rather than guessing.\n"
+            "For an architectural diagram, read its title, headings, legend, component labels, "
+            "and arrows. Identify technologies and cloud providers only when supported by a "
+            "clearly readable label or unmistakable logo; quote that evidence. Explain the goal "
+            "shown by the diagram, trace the visible flow, and map the represented solution from "
+            "entry points through services and data stores to external systems. Keep visible facts "
+            "separate from interpretation. Do not invent missing components or claim the diagram "
+            "is existing-state or target-state unless the image explicitly says so. Use 'Not stated' "
+            "when the goal cannot be established.\n"
+            "Return only a JSON object matching the supplied schema. For non_architecture or "
+            "uncertain images, keep the analysis fields short and explain the reason in uncertainties."
+        ) + "\nJSON schema:\n" + json.dumps(DiagramAnalysis.model_json_schema())
 
         try:
             if "Ollama" in backend_choice:
@@ -380,6 +534,8 @@ class ProposalProcessor:
                         "content": vision_prompt,
                         "images": [img_path]
                     }],
+                    think=False,
+                    format=DiagramAnalysis.model_json_schema(),
                     options={"num_predict": cls._LOCAL_VISION_MAX_OUTPUT_TOKENS},
                 )
                 logger.info(
@@ -437,6 +593,48 @@ class ProposalProcessor:
                 f"'{model_name}' ({type(e).__name__}).]"
             )
 
+    @staticmethod
+    def _parse_diagram_analysis(response: str) -> DiagramAnalysis | None:
+        candidate = response.strip()
+        if candidate.startswith("```") and candidate.endswith("```"):
+            candidate = "\n".join(candidate.splitlines()[1:-1]).strip()
+
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError:
+            start = candidate.find("{")
+            if start < 0:
+                return None
+            try:
+                payload, _ = json.JSONDecoder().raw_decode(candidate[start:])
+            except json.JSONDecodeError:
+                return None
+
+        try:
+            return DiagramAnalysis.model_validate(payload)
+        except ValidationError:
+            return None
+
+    @staticmethod
+    def _format_diagram_analysis(analysis: DiagramAnalysis) -> str:
+        def bullets(items: list[str]) -> str:
+            return "\n".join(f"- {item}" for item in items) or "- None identified."
+
+        technologies = [
+            f"{item.name} — visible evidence: {item.evidence}"
+            for item in analysis.technologies
+        ]
+        return (
+            f"Diagram type: {analysis.diagram_type}\n"
+            f"Analysis confidence: {analysis.confidence}\n"
+            f"Technologies and evidence:\n{bullets(technologies)}\n"
+            f"Diagram goal: {analysis.goal}\n"
+            f"Visible components:\n{bullets(analysis.components)}\n"
+            f"Visible flows:\n{bullets(analysis.flows)}\n"
+            f"Solution map:\n{bullets(analysis.solution_map)}\n"
+            f"Uncertainties:\n{bullets(analysis.uncertainties)}"
+        )
+
     @classmethod
     def _index_sections(cls, sections: list[dict]):
         """Chunks sections (keeping Mermaid blocks together) into ChromaDB."""
@@ -458,7 +656,10 @@ class ProposalProcessor:
             for chunk in chunks:
                 collection.add(
                     documents=[chunk],
-                    metadatas=[{"section": section["heading"]}],
+                    metadatas=[{
+                        "section": section["heading"],
+                        "kind": section.get("kind", "text"),
+                    }],
                     ids=[f"prop_chunk_{chunk_id}"],
                 )
                 chunk_id += 1
@@ -471,6 +672,10 @@ class ProposalProcessor:
         result = collection.get(include=["documents"])
         return "\n".join(result.get("documents") or [])
 
+    @staticmethod
+    def has_proposal_evidence(response: str) -> bool:
+        return response.startswith(("[Proposal Section:", "[Architectural Diagram:"))
+
     @classmethod
     def query_proposal(cls, search_query: str, n_results: int = 4) -> str:
         """Allows specialist agents to search specific parts of the uploaded 100-page proposal."""
@@ -482,16 +687,32 @@ class ProposalProcessor:
             client = chromadb.PersistentClient(path=cls._SESSION_DB_PATH)
             collection = client.get_collection(name=cls._COLLECTION_NAME)
             results = collection.query(query_texts=[search_query], n_results=n_results)
+            diagram_results = collection.get(
+                where={"kind": "diagram"},
+                include=["documents", "metadatas"],
+            )
 
             doc_lists = results.get("documents") or [[]]
             meta_lists = results.get("metadatas") or [[]]
             docs = doc_lists[0]
             metas = meta_lists[0]
 
-            formatted = [
-                f"[Proposal Section: {meta.get('section', 'Unknown')}]\n{doc}"
-                for doc, meta in zip(docs, metas)
-            ]
+            diagram_docs = diagram_results.get("documents") or []
+            diagram_metas = diagram_results.get("metadatas") or []
+            formatted = []
+            seen_documents = set()
+            for doc, meta in zip(diagram_docs, diagram_metas):
+                formatted.append(
+                    f"[Architectural Diagram: {meta.get('section', 'Unknown')}]\n{doc}"
+                )
+                seen_documents.add(doc)
+            for doc, meta in zip(docs, metas):
+                if doc in seen_documents:
+                    continue
+                formatted.append(
+                    f"[Proposal Section: {meta.get('section', 'Unknown')}]\n{doc}"
+                )
+                seen_documents.add(doc)
             logger.info(
                 "Proposal search completed result_count=%d duration_seconds=%.2f",
                 len(formatted),
@@ -514,8 +735,9 @@ class ProposalSearchInput(BaseModel):
 class ProposalSearchTool(BaseTool):
     name: str = "Search Uploaded Solution Proposal"
     description: str = (
-        "Searches the user's uploaded solution proposal (including extracted Lucidchart/architecture "
-        "diagrams and Mermaid flows) for specific components, data flows, or design decisions."
+        "Searches text extracted from the user's proposal and AI-generated descriptions of "
+        "Lucidchart/architecture diagrams or Mermaid flows. Diagram descriptions are not "
+        "verbatim OCR, and this tool does not show the original image."
     )
     args_schema: type[BaseModel] = ProposalSearchInput
     _retrieved_evidence: bool = PrivateAttr(default=False)
@@ -526,5 +748,5 @@ class ProposalSearchTool(BaseTool):
 
     def _run(self, query: str) -> str:
         result = ProposalProcessor.query_proposal(query)
-        self._retrieved_evidence = result.startswith("[Proposal Section:")
+        self._retrieved_evidence = ProposalProcessor.has_proposal_evidence(result)
         return result

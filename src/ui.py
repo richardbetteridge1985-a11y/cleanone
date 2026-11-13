@@ -161,7 +161,10 @@ def build_and_launch_ui():
             "Upload a solution proposal (`.docx`, `.pdf`, `.md`, `.png`, `.jpg`, or `.jpeg`) "
             "and run a full multi-agent review or target a single architectural lens. "
             "The Smart Panel classifies the solution, selects relevant specialists, "
-            "and runs no more than four. Uploads are limited to 25 MB and five diagrams."
+            "and runs every specialist relevant to the solution. Uploads are limited "
+            "to 25 MB; up to 20 images are checked and excess images are reported as skipped. "
+            "Non-architecture visuals are ignored, with at most five architecture "
+            "diagrams analysed."
         )
 
         with gr.Row():
@@ -196,7 +199,10 @@ def build_and_launch_ui():
         with gr.Row():
             with gr.Column(scale=4):
                 file_input = gr.File(
-                    label="4. Upload Solution Proposal (Optional; max 25 MB and five diagrams)",
+                    label=(
+                        "4. Upload Solution Proposal (Optional; max 25 MB, up to "
+                        "20 images checked, 5 architecture diagrams analysed)"
+                    ),
                     file_types=[".docx", ".pdf", ".md", ".png", ".jpg", ".jpeg"],
                     type="filepath"
                 )

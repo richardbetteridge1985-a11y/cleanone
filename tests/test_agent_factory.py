@@ -44,6 +44,17 @@ def _triage_decision(selected_keys, solution_related=True):
     )
 
 
+def _final_review_response():
+    return (
+        "**Implementation Decision:** Pass\n\n"
+        "**Solution Summary**\nThe proposed solution is reviewed.\n\n"
+        "**Solution Document Rating:** Good\n\n"
+        "**Documentation Summary**\nThe document is reviewed.\n\n"
+        "**Testing Plan Coverage:** Good\n\n"
+        "**Testing Summary**\nThe testing plan is reviewed."
+    )
+
+
 def test_smart_panel_routes_to_specialist_runner():
     runner = AgentFactory.create_agent(
         profile_id=AgentFactory.ALL_AGENTS_LABEL,
@@ -72,7 +83,7 @@ def test_internal_judges_are_not_selectable_specialists():
     )
 
 
-def test_architecture_specialists_treat_as_is_examples_as_context_only():
+def test_architecture_specialists_treat_existing_state_examples_as_context_only():
     agents = AgentFactory._load_yaml(AgentFactory._AGENTS_CONFIG_PATH)
     tasks = AgentFactory._load_yaml(AgentFactory._TASKS_CONFIG_PATH)
     specialist_keys = {
@@ -89,12 +100,15 @@ def test_architecture_specialists_treat_as_is_examples_as_context_only():
 
     assert all(agents[key]["task_key"] == "review_task" for key in specialist_keys)
     assert all(
-        "Treat code and solution examples labelled" in agents[key]["backstory"]
-        and "do not reuse or recommend them as the target solution"
+        "Treat clearly identified existing-state examples as context only"
+        in agents[key]["backstory"]
+        and "do not treat them as the target design"
         in agents[key]["backstory"]
         for key in specialist_keys
     )
-    assert "Treat code and solution examples labelled" in tasks["review_task"]["description"]
+    assert "Treat clearly identified existing-state material as context" in tasks[
+        "review_task"
+    ]["description"]
 
 
 def test_cloud_agents_apply_well_architected_guidance_proportionately():
@@ -179,7 +193,7 @@ def test_document_review_agent_uses_general_knowledge_source():
         patch.object(
             ProposalProcessor,
             "query_proposal",
-            return_value="[Proposal Section: Overview]\nArchitecture content.",
+            return_value="[Architectural Diagram: Overview]\nArchitecture content.",
         ) as proposal_search,
         patch("src.agent_factory.ScopedKnowledgeTool") as knowledge_tool,
         patch("src.agent_factory.ProposalSearchTool") as proposal_tool,
@@ -218,7 +232,7 @@ def test_agent_execution_uses_iteration_and_time_limits():
             return_value="AWS guidance.",
         ),
         patch("src.agent_factory.Agent") as agent_factory,
-        patch("src.agent_factory.Task"),
+        patch("src.agent_factory.Task") as task_factory,
         patch("src.agent_factory.Crew") as crew_factory,
     ):
         crew_factory.return_value.kickoff.return_value = "Review"
@@ -228,6 +242,15 @@ def test_agent_execution_uses_iteration_and_time_limits():
     assert agent_factory.call_args.kwargs["max_execution_time"] == 180
     assert agent_factory.call_args.kwargs["verbose"] is False
     assert crew_factory.call_args.kwargs["verbose"] is False
+    task_description = task_factory.call_args.kwargs["description"]
+    assert (
+        "References to existing-state examples in these instructions are not evidence"
+        in task_description
+    )
+    assert (
+        "AI-generated diagram descriptions are fallible interpretations"
+        in task_description
+    )
 
 
 def test_agent_retries_unexecuted_tool_json_without_tools():
@@ -438,7 +461,7 @@ def test_document_review_task_reports_evidence_for_all_general_attributes():
     assert all(name in expected_output for name in attribute_names)
 
 
-def test_final_review_task_lists_blocking_changes_for_pass():
+def test_final_review_task_lists_blocking_changes_only_for_fail():
     tasks = AgentFactory._load_yaml(AgentFactory._TASKS_CONFIG_PATH)
     review_task = tasks["final_review_task"]
     expected_output = review_task["expected_output"]
@@ -447,9 +470,12 @@ def test_final_review_task_lists_blocking_changes_for_pass():
     assert "meet the functional requirements stated" in review_task["description"]
     assert "architectural anti-pattern" in review_task["description"]
     assert "ordinary improvement recommendation alone" in review_task["description"]
-    assert "exactly these seven sections" in expected_output
-    assert "**Implementation Decision:** Pass / Fail" in expected_output
+    assert "following sections in this exact order" in expected_output
+    assert "**Implementation Decision:** [Pass or Fail]" in expected_output
     assert "**Changes Required for Pass**" in expected_output
+    assert "only when the decision is Fail" in expected_output
+    assert "single word Pass or Fail" in expected_output
+    assert "highest to lowest priority" in expected_output
     assert "source specialist" in review_task["description"]
     assert "exact design-document area to update" in review_task["description"]
     assert "Do not list recommended or optional improvements as approval blockers." in review_task["description"]
@@ -484,13 +510,13 @@ def test_smart_panel_selects_triaged_domains_and_always_runs_testing():
         llm=object()
     )
     additional = runner._select_additional_specialists(
-        "Review AWS services and bounded contexts."
+        "The target deploys to AWS using S3 and Lambda, with bounded contexts."
     )
 
     selected = [
         profile_key
         for profile_key, _ in runner._select_specialists(
-            "Review AWS services and bounded contexts.",
+            "The target deploys to AWS using S3 and Lambda, with bounded contexts.",
             triage_selected=("ddd_specialist", "cqrs_specialist"),
             additional_selected=additional,
         )
@@ -504,16 +530,24 @@ def test_smart_panel_selects_triaged_domains_and_always_runs_testing():
     ]
 
 
-def test_smart_panel_rejects_requests_exceeding_specialist_safety_limit():
+def test_smart_panel_can_select_more_than_four_relevant_specialists():
     runner = AgentFactory.create_agent(
         profile_id=AgentFactory.ALL_AGENTS_LABEL,
         llm=object()
     )
+    routing_text = (
+        "The target deploys to AWS using S3 and Lambda, Azure using Cosmos DB, "
+        "and Google Cloud using GKE and Cloud Run."
+    )
+    additional = runner._select_additional_specialists(routing_text)
+    selected = runner._select_specialists(
+        routing_text,
+        triage_selected=_CORE_AGENT_KEYS,
+        additional_selected=additional,
+    )
 
-    with pytest.raises(ValueError, match="safety limit of 4"):
-        runner._select_specialists(
-            "domain model production async testing AWS Azure GCP"
-        )
+    assert len(selected) > 4
+    assert set(_CORE_AGENT_KEYS).issubset({key for key, _ in selected})
 
 
 def test_smart_panel_runs_triage_selected_specialists_and_streams_progress():
@@ -536,6 +570,8 @@ def test_smart_panel_runs_triage_selected_specialists_and_streams_progress():
                     f"### {config['role']}\nFeedback from {config['role']}."
                     for _, config in selected_specialists
                 )
+            if agent.agent_config["role"] == "Overall Solution Review Judge":
+                return _final_review_response()
             return agent.agent_config["role"]
         return f"Feedback from {agent.agent_config['role']}."
 
@@ -644,13 +680,14 @@ def test_smart_panel_synthesizes_document_review_into_final_output():
     assert "Revised advice." in report
     assert "**Reconciliation note:** Combined conflicting proposals." in report
     assert "Document peer review recommendations." not in report
-    assert "**Solution Document Rating:** Fair" in report
+    assert "**Solution Document Rating:**\nFair" in report
     assert "**Documentation Summary**" in report
     assert "- Clarify service ownership and persistence." in report
     assert "**Solution Summary**" in report
-    assert "**Changes Required for Pass**" in report
-    assert "None — no blocking changes are required." in report
-    assert "**Testing Plan Coverage:** Fair" in report
+    assert "**Changes Required for Pass**" not in report
+    assert "**Implementation Decision:**\nPass" in report
+    assert "no architectural anti-pattern or severe direct violation" not in report
+    assert "**Testing Plan Coverage:**\nFair" in report
     assert "**Testing Summary**" in report
     assert "Test retries, idempotency, and dead-letter handling." in report
     assert "Document peer review recommendations." not in report
@@ -674,7 +711,14 @@ def test_smart_panel_preserves_originals_if_technical_reconciliation_fails():
         if agent.agent_config["role"] == "Solution Document Architecture Peer Reviewer":
             return "Document peer review."
         if agent.agent_config["role"] == "Overall Solution Review Judge":
-            return "Overall review."
+            return (
+                "**Implementation Decision:** Pass\n\n"
+                "**Solution Summary**\nThe review package was assessed.\n\n"
+                "**Solution Document Rating:** Good\n\n"
+                "**Documentation Summary**\nThe proposal is documented.\n\n"
+                "**Testing Plan Coverage:** Good\n\n"
+                "**Testing Summary**\nThe test plan was reviewed."
+            )
         return f"Original advice from {agent.agent_config['role']}."
 
     with (
@@ -701,13 +745,13 @@ def test_smart_panel_includes_only_clouds_mentioned_in_request():
         llm=object()
     )
     additional = runner._select_additional_specialists(
-        "The solution deploys to AWS S3 and Azure Cosmos DB."
+        "The solution deploys to AWS using S3 and to Azure using Cosmos DB."
     )
 
     selected = [
         profile_key
         for profile_key, _ in runner._select_specialists(
-            "The solution deploys to AWS S3 and Azure Cosmos DB.",
+            "The solution deploys to AWS using S3 and to Azure using Cosmos DB.",
             triage_selected=("clean_arch_specialist",),
             additional_selected=additional,
         )
@@ -716,6 +760,48 @@ def test_smart_panel_includes_only_clouds_mentioned_in_request():
     assert "aws_specialist" in selected
     assert "azure_specialist" in selected
     assert "gcp_specialist" not in selected
+
+
+def test_cloud_specialists_ignore_incidental_mentions_and_comparisons():
+    runner = AgentFactory.create_agent(
+        profile_id=AgentFactory.ALL_AGENTS_LABEL,
+        llm=object(),
+    )
+    routing_text = (
+        "Compare AWS Lambda, Azure Cosmos DB, and Google Cloud Run as possible options. "
+        "No target platform has been selected."
+    )
+
+    cloud_specialists = {
+        profile_key
+        for profile_key, _ in runner._select_additional_specialists(routing_text)
+        if profile_key in {"aws_specialist", "azure_specialist", "gcp_specialist"}
+    }
+
+    assert cloud_specialists == set()
+
+
+def test_cloud_specialists_route_on_clear_usage_or_diagram_services():
+    runner = AgentFactory.create_agent(
+        profile_id=AgentFactory.ALL_AGENTS_LABEL,
+        llm=object(),
+    )
+    routing_text = (
+        "The workload runs on AWS in us-east-1. Azure hosts the identity service "
+        "with Entra ID. The architecture diagram contains GKE and Cloud Run."
+    )
+
+    cloud_specialists = {
+        profile_key
+        for profile_key, _ in runner._select_additional_specialists(routing_text)
+        if profile_key in {"aws_specialist", "azure_specialist", "gcp_specialist"}
+    }
+
+    assert cloud_specialists == {
+        "aws_specialist",
+        "azure_specialist",
+        "gcp_specialist",
+    }
 
 
 def test_smart_panel_routes_cloud_agents_using_uploaded_document_content():
@@ -735,6 +821,8 @@ def test_smart_panel_routes_cloud_agents_using_uploaded_document_content():
                     f"### {config['role']}\nFeedback from {config['role']}."
                     for config in executed_specialists
                 )
+            if agent.agent_config["role"] == "Overall Solution Review Judge":
+                return _final_review_response()
             return agent.agent_config["role"]
 
         executed_specialists.append(agent.agent_config)
@@ -784,24 +872,50 @@ def test_smart_panel_rejects_unrelated_content_before_running_specialists():
     execute.assert_not_called()
 
 
-def test_smart_panel_limits_additional_agents_before_allocating_core_slots():
+def test_smart_panel_runs_more_than_four_specialists_without_limiting_triage():
     runner = AgentFactory.create_agent(
         profile_id=AgentFactory.ALL_AGENTS_LABEL,
         llm=object(),
     )
-
-    additional = runner._select_additional_specialists(
-        "test AWS Azure GCP deployment"
+    user_request = (
+        "Review domain modeling, production, async, and testing. The target deploys "
+        "to AWS using S3 and Lambda, Azure using Cosmos DB, and Google Cloud using "
+        "GKE and Cloud Run."
     )
-    assert len(additional) > runner.MAX_SPECIALISTS - 1
+    triage = _triage_decision(_CORE_AGENT_KEYS)
+    routing_text = user_request.casefold()
+    additional = runner._select_additional_specialists(routing_text)
+    expected_specialists = runner._select_specialists(
+        routing_text,
+        triage_selected=triage.selected_agent_keys,
+        additional_selected=additional,
+    )
+    executed_specialists = []
 
-    with patch(
-        "src.agent_factory.SolutionArchitectTriageAgent.assess",
-        return_value=_triage_decision((), solution_related=False),
-    ) as assess:
-        list(runner.run("test AWS Azure GCP deployment"))
+    def fake_execute(agent, _):
+        if agent.agent_config.get("internal_only"):
+            if agent.agent_config["role"] == "Overall Solution Review Judge":
+                return _final_review_response()
+            return f"Review from {agent.agent_config['role']}."
+        executed_specialists.append(agent.agent_config["role"])
+        return f"Review from {agent.agent_config['role']}."
 
-    assert assess.call_args.kwargs["available_agent_slots"] == 1
+    with (
+        patch(
+            "src.agent_factory.SolutionArchitectTriageAgent.assess",
+            return_value=triage,
+        ) as assess,
+        patch(
+            "src.agent_factory.AgentRunner.execute_sync",
+            autospec=True,
+            side_effect=fake_execute,
+        ),
+    ):
+        list(runner.run(user_request))
+
+    assert len(expected_specialists) > 4
+    assert len(executed_specialists) == len(expected_specialists)
+    assert "available_agent_slots" not in assess.call_args.kwargs
 
 
 def test_single_specialist_label_still_resolves():
@@ -811,6 +925,59 @@ def test_single_specialist_label_still_resolves():
     )
 
     assert runner.agent_config["role"] == "AWS Cloud Infrastructure Architect"
+    assert runner.single_specialist
+
+
+def test_single_gcp_review_runs_only_gcp_and_omits_testing_scope():
+    runner = AgentFactory.create_agent(
+        profile_id="Gcp Specialist",
+        llm=object(),
+    )
+
+    with (
+        patch(
+            "src.agent_factory.RAGEngine.query_knowledge_base",
+            return_value="Google Cloud guidance.",
+        ),
+        patch("src.agent_factory.Agent") as agent_factory,
+        patch("src.agent_factory.Task") as task_factory,
+        patch("src.agent_factory.Crew") as crew_factory,
+    ):
+        crew_factory.return_value.kickoff.return_value = "GCP review."
+        runner.execute_sync("Review this solution, including testing.")
+
+    assert agent_factory.call_count == 1
+    assert agent_factory.call_args.kwargs["role"] == "GCP Cloud Infrastructure Architect"
+    assert len(crew_factory.call_args.kwargs["agents"]) == 1
+    task_arguments = task_factory.call_args.kwargs
+    assert "SINGLE-SPECIALIST SCOPE" in task_arguments["description"]
+    assert "Do not assess test-plan coverage" in task_arguments["description"]
+    assert "Testing Plan Coverage" not in task_arguments["expected_output"]
+    assert "Key Areas to Test" not in task_arguments["expected_output"]
+
+
+def test_single_testing_specialist_retains_testing_assessment():
+    runner = AgentFactory.create_agent(
+        profile_id="Testing Specialist",
+        llm=object(),
+    )
+
+    with (
+        patch(
+            "src.agent_factory.RAGEngine.query_knowledge_base",
+            return_value="Testing guidance.",
+        ),
+        patch("src.agent_factory.Agent"),
+        patch("src.agent_factory.Task") as task_factory,
+        patch("src.agent_factory.Crew") as crew_factory,
+    ):
+        crew_factory.return_value.kickoff.return_value = "Testing review."
+        runner.execute_sync("Review this solution.")
+
+    task_arguments = task_factory.call_args.kwargs
+    assert "Testing Plan Coverage" in task_arguments["expected_output"]
+    assert "Key Areas to Test" in task_arguments["expected_output"]
+    assert "cover testing only" in task_arguments["description"]
 
 
 def test_agent_task_uses_shared_concise_response_format():
@@ -847,7 +1014,7 @@ def test_proposal_search_tool_tracks_retrieved_evidence():
     with patch.object(
         ProposalProcessor,
         "query_proposal",
-        return_value="[Proposal Section: Overview]\nArchitecture content."
+        return_value="[Architectural Diagram: Overview]\nArchitecture content."
     ):
         tool._run("architecture")
 
@@ -865,6 +1032,24 @@ def test_proposal_search_tool_marks_empty_results_as_not_retrieved():
         tool._run("architecture")
 
     assert not tool.retrieved_evidence
+
+
+def test_proposal_search_tool_discloses_generated_diagram_description_limits():
+    description = ProposalSearchTool().description
+    assert "not verbatim OCR" in description
+    assert "does not show the original image" in description
+
+
+def test_internal_review_prompts_do_not_treat_vision_descriptions_as_ocr():
+    tasks = AgentFactory._load_yaml(AgentFactory._TASKS_CONFIG_PATH)
+
+    for task_key in (
+        "technical_reconciliation_task",
+        "solution_document_review_task",
+        "final_review_task",
+    ):
+        assert "AI-generated diagram descriptions" in tasks[task_key]["description"]
+        assert "not verified OCR" in tasks[task_key]["description"]
 
 
 def test_runner_displays_prompt_and_missing_document_indicators():
